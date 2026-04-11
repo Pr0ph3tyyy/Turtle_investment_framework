@@ -27,6 +27,40 @@ REPORTS_START = "<!-- REPORTS_START -->"
 REPORTS_END = "<!-- REPORTS_END -->"
 
 
+def resolve_code(query: str) -> str:
+    """将公司名称或股票代码统一解析为股票代码。
+
+    支持：
+    - 纯股票代码（600887、00728.HK 等）
+    - 公司名称（中国食品、伊利股份 等）—— 匹配 output/ 目录名中的名称部分
+    """
+    query = query.strip()
+    # 判断是否像股票代码（纯数字或带后缀）
+    if re.match(r"^\d{4,6}(\.(SH|SZ|HK))?$", query, re.IGNORECASE):
+        return query
+
+    # 按公司名称匹配 output/ 目录（格式：{code}_{company}）
+    matches = []
+    for d in OUTPUT_DIR.iterdir():
+        if not d.is_dir():
+            continue
+        parts = d.name.split("_", 1)
+        if len(parts) == 2 and query in parts[1]:
+            matches.append(parts[0])
+
+    if len(matches) == 1:
+        print(f"  识别公司名称「{query}」→ 股票代码 {matches[0]}")
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(
+            f"公司名称「{query}」匹配到多个股票：{', '.join(matches)}，请直接输入股票代码。"
+        )
+    raise FileNotFoundError(
+        f"未找到公司「{query}」，请检查名称或直接输入股票代码。\n"
+        f"可用列表：{', '.join(d.name for d in OUTPUT_DIR.iterdir() if d.is_dir())}"
+    )
+
+
 def find_report(code: str) -> Path:
     """在 output/ 中查找股票代码对应的报告文件（含子目录）。"""
     code_clean = code.upper().replace(".SH", "").replace(".SZ", "").replace(".HK", "")
@@ -54,16 +88,28 @@ def extract_company_name(content: str) -> str:
 
 
 def extract_conclusion(content: str) -> str:
-    """从报告中提取最终判断（买入/观察/排除）。"""
-    match = re.search(r"最终判断[：:]\s*[\*\*]*(.+?)[\*\*]*\n", content)
-    if match:
-        verdict = match.group(1).strip().strip("*").strip()
-        if "买入" in verdict:
-            return "买入"
-        if "观察" in verdict:
-            return "观察"
-        if "排除" in verdict:
-            return "排除"
+    """从报告中提取最终判断（买入/观察/排除）。
+
+    兼容三种格式：
+    1. 最终判断：买入（70%仓位）
+    2. ### 最终评级：**观察（偏正面）**
+    3. **一句话结论**：...— **观察（偏正面，等待价格回调）**。
+    """
+    patterns = [
+        r"最终判断[：:]\s*\**([^*\n]+)",
+        r"最终评级[：:]\s*\**([^*\n]+)",
+        r"一句话结论[：:][^\n]*?—\s*\**([^*\n（，。]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, content)
+        if match:
+            verdict = match.group(1).strip().strip("*").strip()
+            if "买入" in verdict:
+                return "买入"
+            if "观察" in verdict:
+                return "观察"
+            if "排除" in verdict:
+                return "排除"
     return "—"
 
 
@@ -153,16 +199,22 @@ def git_push(code: str, company: str, dry_run: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="将分析报告发布到 GitHub Pages")
-    parser.add_argument("code", help="股票代码，如 600887 或 00700.HK")
+    parser.add_argument("code", help="股票代码或公司名称，如 600887、00700.HK、伊利股份")
     parser.add_argument("--push", action="store_true", help="发布后自动执行 git push")
     parser.add_argument("--dry-run", action="store_true", help="预览操作，不实际写文件")
     args = parser.parse_args()
 
-    code = args.code.strip()
-    code_clean = code.upper().replace(".SH", "").replace(".SZ", "").replace(".HK", "")
-
     print(f"\n龟龟投资策略 · 报告发布工具")
     print(f"{'─' * 40}")
+
+    # 0. 解析输入（支持公司名称）
+    try:
+        code = resolve_code(args.code)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"✗ {e}")
+        sys.exit(1)
+
+    code_clean = code.upper().replace(".SH", "").replace(".SZ", "").replace(".HK", "")
 
     # 1. 查找源报告
     try:
