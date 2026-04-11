@@ -1,0 +1,34 @@
+/* 财务报告表格样式 */
+.md-typeset table {
+  display: block;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-size: 0.85em;
+}
+
+.md-typeset table th {
+  background-color: var(--md-primary-fg-color);
+  color: var(--md-primary-bg-color);
+  white-space: nowrap;
+}
+
+.md-typeset table td,
+.md-typeset table th {
+  padding: 0.5em 0.75em;
+  border: 1px solid var(--md-default-fg-color--lighter);
+}
+
+.md-typeset table tr:nth-child(even) {
+  background-color: var(--md-default-fg-color--lightest);
+}
+
+/* 报告终判模块 */
+.md-typeset pre code {
+  font-size: 0.82em;
+  line-height: 1.6;
+}
+
+/* 买入/排除结论高亮 */
+.md-typeset strong {
+  color: var(--md-primary-fg-color--dark);
+}

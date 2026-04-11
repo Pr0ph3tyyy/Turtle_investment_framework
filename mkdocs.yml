@@ -1,0 +1,67 @@
+site_name: 龟龟投资策略 · 选股报告
+site_url: https://pr0ph3tyyy.github.io/Turtle_investment_framework/
+site_description: 基于龟龟投资策略四因子模型的 A 股/港股基本面分析报告
+site_author: Pr0ph3tyyy
+repo_url: https://github.com/Pr0ph3tyyy/Turtle_investment_framework
+repo_name: Turtle_investment_framework
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  language: zh
+  palette:
+    - scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: 切换至暗色模式
+    - scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: 切换至亮色模式
+  features:
+    - navigation.instant
+    - navigation.top
+    - navigation.indexes
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - toc.follow
+  font:
+    text: Noto Sans SC
+    code: Roboto Mono
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - tables
+  - admonition
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+      title: 本页目录
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+plugins:
+  - search:
+      lang: zh
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Pr0ph3tyyy/Turtle_investment_framework
+
+extra_css:
+  - stylesheets/report.css
