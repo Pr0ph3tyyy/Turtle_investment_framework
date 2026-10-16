@@ -17,11 +17,213 @@ def _yf():
 from tushare_modules.constants import (
     HK_INCOME_MAP, HK_BALANCE_MAP, HK_CASHFLOW_MAP,
     US_INCOME_MAP, US_BALANCE_MAP, US_CASHFLOW_MAP,
+    DEBT_LINE_ITEM_FIELDS, DEBT_ROW_LABELS, field_names,
 )
 
 
 class FinancialsMixin:
     """Mixin providing financial statement methods for TushareClient."""
+
+    def _apply_balance_overrides(self, pivoted, ts_code: str):
+        """用 `{output_dir}/balance_sheet_overrides.json` 补**上游整段缺失**的科目。
+
+        为什么需要（00506 实测）：上游 `hk_balancesheet` 的「商誉」行项目**自 2018-06-30
+        起不再返回数值**（34 行的最大值 3,279,160 千元、日期全部 ≤2018H1），于是 §4 的
+        「商誉」行在 2021–2026 展示期全空，而 2025 年报附注 17 / 关键审计事项明载商誉
+        RMB1,846,799,000 ⇒ §17.8「商誉/总资产」渲染 0.00%、§17.15 的 A 严口径把商誉
+        按 0 扣除，**高估防御性净值约 1,846.80 百万元**。
+
+        这不是"映射写错"（`HK_BALANCE_MAP["goodwill"] = "商誉"` 正确），而是**上游停更**，
+        所以判据只能来自年报。与 `fx.json`/`shares.json`/`dividends_declared.json` 同级：
+        来源可核、只补空值、补了就在返回值里点名，绝不静默。
+
+        Returns (pivoted, applied_notes)
+        """
+        path = self._store.get("_output_path")
+        if not path or pivoted is None or pivoted.empty:
+            return pivoted, []
+        import json
+        from pathlib import Path
+        p = Path(str(path)).parent / "balance_sheet_overrides.json"
+        if not p.is_file():
+            return pivoted, []
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            self._store.setdefault("_data_warnings", []).append(
+                f"balance_sheet_overrides.json 解析失败，未补任何科目：{exc}")
+            return pivoted, []
+        # 单位硬约束：`_pivot_hk_line_items` 的 ind_value 是**元**，§4 渲染时才 ÷1e6。
+        # sidecar 若按"百万元"写就会被再除一次 ⇒ 渲染成 0.00（实测踩过这个坑）。
+        unit = str(data.get("unit") or "元")
+        if unit not in ("元", "yuan", "CNY"):
+            self._store.setdefault("_data_warnings", []).append(
+                f"balance_sheet_overrides.json 的 unit='{unit}' 不是「元」，"
+                "与上游 ind_value 口径不一致，已跳过补录")
+            return pivoted, []
+
+        # 「无形资产」行的**成分**：`inclusive` = 该行是「含商誉的无形资产总计」
+        # （06078 实测：附註16 栏目头 `商譽｜軟件｜合約權利｜醫療執照｜總計`，
+        #  总计与 §4「无形资产」逐位相等），`disjoint`（缺省）= 商誉与无形资产各自独立。
+        # 这决定 §17.15 的 A 口径能否把两者相加 —— 猜错会重复扣减或漏扣一整个商誉。
+        # 缺省 disjoint ⇒ 与旧实现逐位一致，对既有产物零语义回退。
+        comp = str(data.get("intangibles_composition") or "disjoint").strip().lower()
+        if comp not in ("inclusive", "disjoint"):
+            self._store.setdefault("_data_warnings", []).append(
+                f"balance_sheet_overrides.json 的 intangibles_composition='{comp}' "
+                "不是 inclusive/disjoint，按 disjoint（旧行为）处理")
+            comp = "disjoint"
+        self._store["intangibles_includes_goodwill"] = (comp == "inclusive")
+
+        applied = []
+        if "end_date" not in pivoted.columns:
+            return pivoted, []
+        pivoted = pivoted.copy()
+        ends = pivoted["end_date"].astype(str)
+        # 年度键 `"2025"` 必须落在**该年度的年报行**（1231）上，而不是任意以 "2025"
+        # 开头的行 —— 上游同一 end_date 可能重复多行、且中报行会先被匹配到
+        # （实测：按前缀匹配把 2025 的商誉补到了 2025H1/2026H1 上，§4 展示期仍是空的）。
+        exact = {str(y): f"{y}1231" for y in range(1990, 2100)}
+        for field, per_year in (data.get("overrides") or {}).items():
+            if field not in pivoted.columns:
+                # 整列被丢弃（全 NaN）时先把列建起来，再按年度填
+                pivoted[field] = float("nan")
+            for year, entry in (per_year or {}).items():
+                if year == "source" or not isinstance(entry, (int, float)):
+                    continue
+                target = exact.get(str(year))
+                if target is None:
+                    continue
+                mask = ends == target
+                if not mask.any():
+                    continue
+                # 只补空值：上游有数就绝不动（避免静默改写上游）
+                cur = pivoted.loc[mask, field]
+                if cur.notna().any():
+                    continue
+                pivoted.loc[mask, field] = float(entry)
+                applied.append(f"{field} FY{year}={entry}")
+        if applied:
+            src = (data.get("overrides", {}).get("goodwill", {}) or {}).get("source", "")
+            self._store.setdefault("_data_warnings", []).append(
+                "已按年报补齐上游停更的资产负债表科目（balance_sheet_overrides.json）："
+                + "、".join(applied) + (f"；来源：{src[:60]}" if src else ""))
+            print(f"  ⚙ 资产负债表科目补录（年报口径）: {', '.join(applied)}")
+        return pivoted, applied
+
+    def _record_debt_absence(self, section: str, pivoted, ts_code: str,
+                             upstream_names=None, upstream_has_value=None,
+                             display_periods=None) -> None:
+        """Record *why* a debt line is blank → `self._store["field_absence"]`.
+
+        The pack alone cannot tell "this issuer has no bank borrowings" from
+        "our mapping label missed the upstream item" (the 06862 P0 gap). The
+        difference lives in the **upstream item list**, so it is captured at
+        collection time and handed to ``field_coverage.C2`` via
+        ``{output_dir}/field_absence.json``.
+
+        Only ``verified_absent`` unlocks C2, and it requires **both**:
+
+          1. every period's value is missing (not explicitly 0.0), and
+          2. **every debt-keyword item name present upstream is covered by some
+             field in the map** (see ``_debt_name_coverage``). Condition 2 is what
+             makes the evidence immune to a mapping regression: if
+             ``bond_payable`` is pointed at the wrong name (06862), the real
+             「应付债券」 row is fetched by nobody, shows up as an upstream name no
+             field claims, and the whole journal is refused — C2 keeps failing.
+
+        A-share wide-table packs are recorded as ``unreported`` (the field came
+        back all-NaN, which only proves "upstream gave no number") ⇒ C2 never
+        relaxes on them (fail-closed).
+        """
+        up = {str(n) for n in (upstream_names or ())}
+        # 只有**带值**的上游名字才算"真科目"：上游长表里混着大量历史空壳行
+        # （00506 实测有 2001–2003 年的「短期贷款/长期贷款」但各期 ind_value 全空），
+        # 拿空壳去要求映射认领，只会制造假缺口。
+        valued = {str(n) for n in (upstream_has_value or ())} or up
+        line_item_api = section in ("4", "4P") and not ts_code.upper().endswith(
+            (".SH", ".SZ", ".BJ"))
+        journal = self._store.setdefault("field_absence", {})
+        meta = list(pivoted.columns) if pivoted is not None and not pivoted.empty else []
+        meta = [str(c) for c in meta if str(c) not in ("end_date", "ts_code")]
+        covered, uncovered = self._debt_name_coverage(valued)
+        # 必须在**展示期**窗口内取值：`_pivot_hk_line_items` 保留了 2000 年以来的全部历史
+        # （00506 实测 st_borr 有 39 个非空值，全部来自 2001–2003 年那笔早已清偿的借款），
+        # 拿全历史判断会让"今天没有借款"被十几年前的余额否决。
+        win = pivoted
+        if pivoted is not None and display_periods:
+            shown = {str(d) for d in display_periods}
+            win = pivoted[pivoted["end_date"].astype(str).isin(shown)]
+        for field in DEBT_LINE_ITEM_FIELDS:
+            key = f"{section}.{field}"
+            journal.pop(key, None)
+            if not line_item_api or win is None:
+                continue
+            if field in win.columns:
+                vals = [v for v in win[field].tolist() if pd.notna(v)]
+                if any(float(v) != 0.0 for v in vals):
+                    continue  # 有值 ⇒ 上游给了数，不需要任何缺失说明
+                # 列存在但全 0 ⇒ 上游显式说"余额为零"（与"科目不存在"是两件事）
+                status = "reported_zero" if any(float(v) == 0.0 for v in vals) \
+                    else ("verified_absent" if not uncovered else "mapping_incomplete")
+            else:
+                # ★ 空列是**缺席**的签名：`_pivot_hk_line_items` 会丢弃全 NaN 的列，
+                #   所以"字段不在 columns 里"正是"上游这个科目在展示期内没有数值"。
+                #   旧守卫把这种情况 `continue` 掉 ⇒ 恰好漏掉它本该记录的那一类，
+                #   于是 00506 这种真无借款的包永远拿不到证据、C2 永远 FAIL。
+                #   放行的唯一条件是：上游展示期内**没有任何带值却无人认领**的债类科目。
+                #   （不需要单独检查"本字段自己的名字"：列被丢弃 ⇔ 该字段全部命中行在窗口内
+                #   都是 NaN，那种情况下它的名字不可能出现在 `valued` 里。）
+                status = "mapping_incomplete" if uncovered else "verified_absent"
+            journal[key] = {
+                "section": section, "field": field,
+                "status": status,
+                "row_labels": list(DEBT_ROW_LABELS.get(field, ())),
+                "upstream_names_checked": sorted(up),
+                "upstream_debt_names_covered": sorted(covered),
+                "upstream_debt_names_unmapped": sorted(uncovered),
+                "periods_checked": meta,
+            }
+
+    @staticmethod
+    def _upstream_names_with_values(df, periods=None) -> set:
+        """**本次展示期**内至少有一期带非空数值的上游 ind_name 集合。
+
+        为什么必须限定期间：上游会把整部历史留在长表里（00506 实测 2000–2003 年有
+        「短期贷款/长期贷款/可转换票据及债券」且当年确有余额），而 §4 只展示最近 5 个
+        年报 + 更新的中报。拿二十年前的科目去要求今天的映射认领，会让每个包都"缺口满天飞"
+        —— 判据必须与**被展示的期间**同域。反之，展示期内带值却没被任何字段认领的科目，
+        才是真正的映射缺口（06862 的「应付债券」正是展示期内带值）。
+        """
+        try:
+            if df is None or df.empty or "ind_name" not in df.columns:
+                return set()
+            sub = df
+            if periods is not None:
+                shown = {str(d) for d in periods}
+                if shown:
+                    sub = df[df["end_date"].astype(str).isin(shown)]
+            vals = pd.to_numeric(sub["ind_value"], errors="coerce")
+            return {str(n) for n in sub.loc[vals.notna(), "ind_name"].astype(str)}
+        except Exception:
+            return set()
+
+    @staticmethod
+    def _debt_name_coverage(upstream_names) -> tuple:
+        """上游科目清单里，与债相关的名字是否**全部**被我们的映射认领？
+
+        返回 ``(covered, uncovered)``。判据不依赖任何字段的值 —— 只看
+        「上游有这个名字」与「映射里有这个名字」的集合关系，因此**上游有值而映射
+        写错**（06862：`bond_payable` → 「应付票据(非流动)」，真的「应付债券」无人认领）
+        一定表现为 ``uncovered`` 非空，证据随即被拒。
+        """
+        names = {str(n) for n in (upstream_names or ())}
+        pools = {f: set(field_names(HK_BALANCE_MAP.get(f))) | set(field_names(US_BALANCE_MAP.get(f)))
+                 for f in DEBT_LINE_ITEM_FIELDS}
+        claimed = set().union(*pools.values()) if pools else set()
+        debt_like = {n for n in names
+                     if any(k in n for k in ("借款", "贷款", "债券", "票据", "融资租赁"))}
+        return debt_like & claimed, debt_like - claimed
 
     # --- Feature #14: Section 1 — Basic company info ---
 
@@ -108,7 +310,14 @@ class FinancialsMixin:
                     ["当前价格 (HKD)", close_price],
                     ["PE (TTM)", f"{d.get('pe_ttm', '—')}"],
                     ["PB", f"{d.get('pb_ttm', '—')}"],
-                    ["总市值 (百万港元)", format_number(d.get('total_market_cap', None), divider=1, decimals=2)],
+                    # ⚠️ 本行是**上游 `hk_fina_indicator` 的期末口径**，与 §17.8 的
+                    # 「总市值（百万元）」**不是同一个数**（口径政策 2026-10-14：
+                    # §17.8 用 股数 × 当日价 × fx）。实测 00696：本节 26,277.36 vs §17.8 25,440.30。
+                    # 这里**刻意不重算** —— §1 是"原始数据照录"小节；而且此刻财报尚未进 store，
+                    # 重算需要股数（实测会导致 4 个测试失败）。故只在标签里**声明口径**，
+                    # 让读者不会把期末值误当当日市值。决策用值一律取 §17.8。
+                    ["总市值 (百万港元，**期末**口径；当日口径见 §17.8)",
+                     format_number(self._hk_market_cap_raw(d), divider=1e6, decimals=2)],
                 ]
         except RuntimeError:
             pass
@@ -428,6 +637,11 @@ class FinancialsMixin:
             lines.append("无年报数据\n")
             return "\n".join(lines)
 
+        # 口径分列（known_issues.md §18）：上游的「除税前溢利/税项」是**持续经营**口径，
+        # 而「除税后溢利」是**合计**（含已终止经营）。三者同列会让同年三数不能自洽，
+        # 以除税前/除税后为基础的比率全被污染（06862 实测 2021 差 913.37、2022 差 264.09 百万元）。
+        # 这里把两套口径**分列并标注**，使读者与不变式都能按同口径勾稽；
+        # **不重绑 n_income**（那会静默改变历史净利口径）。
         fields = [
             ("营业额", "revenue"),
             ("营运支出", "oper_cost"),
@@ -436,16 +650,18 @@ class FinancialsMixin:
             ("经营溢利", "operate_profit"),
             ("应占联营公司溢利", "invest_income"),
             ("融资成本", "finance_exp"),
-            ("除税前溢利", "total_profit"),
-            ("税项", "income_tax"),
-            ("除税后溢利", "n_income"),
-            ("股东应占溢利", "n_income_attr_p"),
+            ("除税前溢利（持续经营口径）", "total_profit"),
+            ("税项（持续经营口径）", "income_tax"),
+            ("其中：持续经营业务税后利润", "n_income_cont"),
+            ("其中：终止/非持续业务溢利", "discontinued_profit"),
+            ("除税后溢利（合计 = 持续经营 + 已终止经营）", "n_income"),
+            ("股东应占溢利（含已终止经营）", "n_income_attr_p"),
             ("少数股东损益", "minority_gain"),
-            ("每股基本盈利 (HKD)", "basic_eps"),
-            ("每股摊薄盈利 (HKD)", "diluted_eps"),
+            (f"每股基本盈利 ({self._per_share_unit()})", "basic_eps"),
+            (f"每股摊薄盈利 ({self._per_share_unit()})", "diluted_eps"),
         ]
 
-        headers = ["项目 (百万港元)"] + years
+        headers = [f"项目 ({self._unit_label()})"] + years
         rows = []
         for label, col in fields:
             row = [label]
@@ -460,7 +676,20 @@ class FinancialsMixin:
         table = format_table(headers, rows, alignments=["l"] + ["r"] * len(years))
         lines.append(table)
         lines.append("")
-        lines.append("*单位: 百万港元 (原始数据 / 1,000,000), EPS为港元/股*")
+        _cont = pivoted.get("n_income_cont")
+        _has_cont = _cont is not None and hasattr(_cont, "notna") and bool(_cont.notna().any())
+        if _has_cont:
+            lines.append("> **口径说明（重要）**：「除税前溢利 / 税项」为**持续经营**口径，"
+                         "「除税后溢利（合计）」为**含已终止经营**口径 ⇒ "
+                         "`除税后（合计) = 持续经营税后 + 终止业务溢利`，"
+                         "而 `除税前 − 税项 = 持续经营税后`。"
+                         "**不得**把合计口径的除税后与持续经营口径的除税前相减求「有效税率」。")
+            lines.append("")
+        else:
+            lines.append("> ⚠️ 上游未提供「持续经营业务税后利润」行 ⇒ 无法分离持续/已终止经营口径；"
+                         "以除税前/除税后为基础的比率存在口径混用风险（见 known_issues.md §18）。")
+            lines.append("")
+        lines.append(f"*单位: {self._unit_label()} (原始数据 / 1,000,000), EPS为{self._per_share_unit()}/股*")
         if yf_used:
             lines.append("\n*部分缺失数据由 yfinance 补充*")
         return "\n".join(lines)
@@ -555,7 +784,10 @@ class FinancialsMixin:
                                     "accounts_receiv,oth_receiv,inventories,"
                                     "oth_cur_assets,total_cur_assets,"
                                     "lt_eqt_invest,fix_assets,cip,"
-                                    "intang_assets,goodwill,total_assets,"
+                                    # ⚠️ A股字段名是 `intan_assets`（**没有** g）；
+                                    # 写错会被 Tushare 静默忽略 ⇒ 无形资产整行全空。
+                                    # 见 §四十三与下方 df.rename 归一化。
+                                    "intan_assets,goodwill,total_assets,"
                                     "st_borr,notes_payable,acct_payable,"
                                     "contract_liab,adv_receipts,"
                                     "payroll_payable,taxes_payable,oth_payable,"
@@ -563,7 +795,14 @@ class FinancialsMixin:
                                     "total_cur_liab,lt_borr,bond_payable,"
                                     "lt_payable,lease_liab,provisions,defer_inc_non_cur_liab,"
                                     "total_liab,defer_tax_assets,defer_tax_liab,"
-                                    "total_hldr_eqy_exc_min_int,minority_int")
+                                    "total_hldr_eqy_exc_min_int,minority_int,"
+                                    # ⚠️ **必须取** `total_share`（期末申报股数，单位「股」）：
+                                    # 它是与 BPS/EPS（同为期末口径）**同期**的权威股本，
+                                    # 优先于 `daily_basic.total_share`（当前口径）。
+                                    # 缺它 ⇒ `resolve_shares` 只能用当前口径或反推降级值，
+                                    # 于是 I9 路径 B（权益÷BPS）与路径 A 不同源
+                                    # ⇒ 误阻断 31 只银行/券商/电力股（findings D-15）。
+                                    "total_share")
         section_label = "4P. 母公司资产负债表" if report_type == "6" else "4. 合并资产负债表"
         lines = [format_header(2, section_label), ""]
 
@@ -571,6 +810,15 @@ class FinancialsMixin:
             lines.append("数据缺失\n")
             return "\n".join(lines)
 
+        # ── 字段名归一（known_issues §四十三）──────────────────────────────
+        # Tushare A股 `balancesheet` 的无形资产字段名是 **`intan_assets`**，而本仓库
+        # 内部键（HK/US 映射与 `derived_metrics`）统一用 `intang_assets`。
+        # 原先请求的是 `intang_assets` —— Tushare **静默忽略不存在的字段**，于是
+        # §4「无形资产」行 100/103 个产物全空、§17.15 的 A 严口径把无形资产按 0 扣除
+        # （系统性高估下行净值），且因 §17.15 当时没有任何门禁而无人发现。
+        # 请求正确字段名后归一回内部键，A/HK/US 三路一致。
+        if "intan_assets" in df.columns and "intang_assets" not in df.columns:
+            df = df.rename(columns={"intan_assets": "intang_assets"})
         df, years = self._prepare_display_periods(df)
 
         # Store for derived metrics
@@ -666,6 +914,24 @@ class FinancialsMixin:
             return "\n".join(lines)
 
         pivoted, yf_used = self._yf_fill_missing_hk(pivoted, ts_code, "balance")
+        # 上游整段停更的科目（如 00506 的商誉）按年报补齐 —— 必须在 _record_debt_absence
+        # 与 _prepare_display_periods 之前，否则补录值进不了 §4 与 §17
+        pivoted, _ovr = self._apply_balance_overrides(pivoted, ts_code)
+
+        # 科目缺失证据（见 _record_debt_absence）：必须在 _prepare_display_periods 之前记录
+        # —— 后者只保留 5 个年报 + 更新的中报，会把「全年度」截短。
+        # upstream_names 是**原始 ind_name 全集**（不是 map 认领的名字）：拿 map 自己的标签
+        # 去"证实" map 没漏，等于让写错映射的证据自己签自己的字（06862 会因此漏网）。
+        _bal_map = HK_BALANCE_MAP if self._is_hk(ts_code) else US_BALANCE_MAP
+        # 展示期窗口（§4 只展示最近 5 个年报 + 更新的中报）：上游长表里有 2000 年
+        # 以来的全部历史，不裁窗口就会拿二十年前早就清掉的借款去要求今天的映射认领。
+        _shown = self._prepare_display_periods(pivoted)[0]["end_date"].astype(str).tolist()
+        self._record_debt_absence(
+            "4", pivoted, ts_code,
+            upstream_names=set(df["ind_name"].astype(str))
+            | {n for f in DEBT_LINE_ITEM_FIELDS for n in field_names(_bal_map.get(f))},
+            upstream_has_value=self._upstream_names_with_values(df, _shown),
+            display_periods=_shown)
 
         pivoted, years = self._prepare_display_periods(pivoted)
         self._store["balance_sheet"] = pivoted
@@ -688,6 +954,18 @@ class FinancialsMixin:
             ("短期贷款", "st_borr"),
             ("流动负债合计", "total_cur_liab"),
             ("长期贷款", "lt_borr"),
+            # §17.16 防御性门槛组 / §17.15 防御性净值所需
+            ("交易性金融资产", "trad_asset"),
+            ("短期存款", "st_deposit"),
+            ("中长期存款", "lt_deposit"),
+            ("受限制存款及现金", "restricted_cash"),
+            ("商誉", "goodwill"),
+            ("融资租赁负债(流动)", "lease_liab"),
+            # 非流动租赁负债必须与流动部分并列，否则"净现金/净负债"口径不可核验
+            # （06862 实测：流动 856.80 已列、非流动 2,649.70 被白名单漏掉）
+            ("融资租赁负债(非流动)", "lease_liab_noncur"),
+            ("应付债券", "bond_payable"),
+            ("应付票据(非流动)", "notes_payable_noncur"),
             ("总负债", "total_liab"),
             ("递延税项资产", "defer_tax_assets"),
             ("递延税项负债", "defer_tax_liab"),
@@ -695,7 +973,7 @@ class FinancialsMixin:
             ("少数股东权益", "minority_int"),
         ]
 
-        headers = ["项目 (百万港元)"] + years
+        headers = [f"项目 ({self._unit_label()})"] + years
         rows = []
         for label, col in fields:
             row = [label]
@@ -706,7 +984,7 @@ class FinancialsMixin:
         table = format_table(headers, rows, alignments=["l"] + ["r"] * len(years))
         lines.append(table)
         lines.append("")
-        lines.append("*单位: 百万港元*")
+        lines.append(f"*单位: {self._unit_label()}*")
         if yf_used:
             lines.append("\n*部分缺失数据由 yfinance 补充*")
         return "\n".join(lines)
@@ -728,6 +1006,24 @@ class FinancialsMixin:
             return "\n".join(lines)
 
         pivoted, yf_used = self._yf_fill_missing_hk(pivoted, ts_code, "balance")
+        # 上游整段停更的科目（如 00506 的商誉）按年报补齐 —— 必须在 _record_debt_absence
+        # 与 _prepare_display_periods 之前，否则补录值进不了 §4 与 §17
+        pivoted, _ovr = self._apply_balance_overrides(pivoted, ts_code)
+
+        # 科目缺失证据（见 _record_debt_absence）：必须在 _prepare_display_periods 之前记录
+        # —— 后者只保留 5 个年报 + 更新的中报，会把「全年度」截短。
+        # upstream_names 是**原始 ind_name 全集**（不是 map 认领的名字）：拿 map 自己的标签
+        # 去"证实" map 没漏，等于让写错映射的证据自己签自己的字（06862 会因此漏网）。
+        _bal_map = HK_BALANCE_MAP if self._is_hk(ts_code) else US_BALANCE_MAP
+        # 展示期窗口（§4 只展示最近 5 个年报 + 更新的中报）：上游长表里有 2000 年
+        # 以来的全部历史，不裁窗口就会拿二十年前早就清掉的借款去要求今天的映射认领。
+        _shown = self._prepare_display_periods(pivoted)[0]["end_date"].astype(str).tolist()
+        self._record_debt_absence(
+            "4", pivoted, ts_code,
+            upstream_names=set(df["ind_name"].astype(str))
+            | {n for f in DEBT_LINE_ITEM_FIELDS for n in field_names(_bal_map.get(f))},
+            upstream_has_value=self._upstream_names_with_values(df, _shown),
+            display_periods=_shown)
 
         pivoted, years = self._prepare_display_periods(pivoted)
         self._store["balance_sheet"] = pivoted
@@ -897,17 +1193,23 @@ class FinancialsMixin:
             lines.append("无年报数据\n")
             return "\n".join(lines)
 
-        headers = ["项目 (百万港元)"] + years
+        headers = [f"项目 ({self._unit_label()})"] + years
         rows = []
 
         simple_fields = [
             ("经营业务现金净额 (OCF)", "n_cashflow_act"),
             ("投资业务现金净额", "n_cashflow_inv_act"),
             ("融资业务现金净额", "n_cash_flows_fnc_act"),
-            ("购建无形资产及其他资产", "c_pay_acq_const_fiolta"),
+            ("资本开支（购建固定＋无形及其他）", "c_pay_acq_const_fiolta"),
             ("已付税项", "c_paid_for_taxes"),
             ("收回投资所得现金", "c_recp_return_invest"),
             ("已付股息(融资)", "c_pay_dist_dpcp_int_exp"),
+            # 因子3 的额外扣减项（§17.5 使用；见 known_issues.md §3.21 21e）
+            ("收购附属公司", "c_pay_acq_sub"),
+            ("偿还融资租赁", "c_pay_fin_lease"),
+            ("购买少数股东权益", "c_pay_minority"),
+            ("已付利息(融资)", "c_pay_int_finance"),
+            ("已付利息(经营)", "c_pay_int_operating"),
         ]
         for label, col in simple_fields:
             row = [label]
@@ -940,7 +1242,7 @@ class FinancialsMixin:
         table = format_table(headers, rows, alignments=["l"] + ["r"] * len(years))
         lines.append(table)
         lines.append("")
-        lines.append("*单位: 百万港元; FCF = OCF - |Capex|; c_pay_to_staff 港股不可用*")
+        lines.append(f"*单位: {self._unit_label()}; FCF = OCF - |Capex|; c_pay_to_staff 港股不可用*")
         if yf_used:
             lines.append("\n*部分缺失数据由 yfinance 补充*")
         return "\n".join(lines)
@@ -1114,11 +1416,15 @@ class FinancialsMixin:
         df = df[df["_year"].isin(top_years)].drop(columns=["_year"])
 
         # --- yfinance cross-validation for stuck DPS bug ---
-        # Detect suspicious pattern: all dps_hkd values identical
+        # Tushare's HK dps_hkd has been observed to return a near-constant series:
+        #   (a) 2026-10 live API : 0.761 for every period        → 1 distinct value
+        #   (b) 2026-08 data pack: {0.7220, 1.2290} across 10 rows → 2 distinct values
+        # The original `len(set(...)) == 1` test only caught (a); case (b) slipped
+        # through and produced §17.10 法1 payout ratios of 192%–983%.
         dps_values = [self._safe_float(r.get("dps_hkd")) for _, r in df.iterrows()
                       if self._safe_float(r.get("dps_hkd")) is not None and self._safe_float(r.get("dps_hkd")) > 0]
-        dps_looks_stuck = (len(dps_values) >= 3
-                           and len(set(round(v, 4) for v in dps_values)) == 1)
+        distinct_dps = len({round(v, 4) for v in dps_values})
+        dps_looks_stuck = (len(dps_values) >= 3 and distinct_dps <= 2)
 
         yf_annual: dict[str, float] | None = None
         dps_source = "tushare"
@@ -1133,12 +1439,13 @@ class FinancialsMixin:
                         df.at[idx, "dps_hkd"] = yf_annual[year]
                 dps_source = "yfinance"
                 self._store["_dividend_warning"] = (
-                    f"Tushare dps_hkd 疑似数据填充错误（所有期间值相同={dps_values[0]:.4f}），"
-                    f"已使用 yfinance 股息数据替代"
+                    f"Tushare dps_hkd 疑似数据填充错误（{len(dps_values)} 期中仅 "
+                    f"{distinct_dps} 个不同值），已使用 yfinance 股息数据替代"
                 )
 
         # Store for derived metrics
         self._store["dividends_hk"] = df
+        self._store["dividends_ts_code"] = ts_code   # 供 _get_payout_by_year 取汇率折算
 
         # Build a compatible dividends store for downstream (§17)
         div_records = []
@@ -1164,7 +1471,16 @@ class FinancialsMixin:
                 if eps and eps > 0:
                     eps_lookup[y] = eps
 
-        headers = ["年度", "每股股息 (HKD)", "派息率 (%)"]
+        # ---- fail-closed 展示（2026-10-13）----
+        # 若 DPS 序列呈"按公告快照"特征（≥3 期、不同值 ≤2）且无法用 yfinance 替换，则**不给出**
+        # 由它推得的派息率：该列是"DPS÷EPS"，在 DPS 被上游重复填充时会随 EPS 变化而"看起来逐年不同"，
+        # 从而伪装成真实的派息政策（06862 实测：DPS 各年恒 0.7610，派息率却显示 96.40/87.83/84.87%，
+        # 被下游当成"分配意愿下降"的证据）。分红绝对额请用 §5 已付股息（现金流口径）。
+        # 注意：**不改动 `_store["dividends"]`** —— §17.10 的 M_rec 在 DPS 恒定时本就采用法2（现金流口径），
+        # 清空 store 反而会让 M 失效；此处只修展示层。
+        stuck_display = dps_looks_stuck and dps_source != "yfinance"
+
+        headers = ["年度", "每股股息 (HKD)" + ("（⚠️ 上游快照失真）" if stuck_display else ""), "派息率 (%)"]
         rows = []
         for _, r in df.iterrows():
             year = str(r.get("end_date", ""))[:4]
@@ -1176,11 +1492,19 @@ class FinancialsMixin:
             rows.append([
                 year,
                 f"{dps:.4f}" if dps is not None and dps == dps else "—",
-                f"{payout:.2f}" if payout is not None else "—",
+                "—" if stuck_display else (f"{payout:.2f}" if payout is not None else "—"),
             ])
 
         table = format_table(headers, rows, alignments=["l", "r", "r"])
         lines.append(table)
+        if stuck_display:
+            lines.append("")
+            lines.append(f"> ⚠️ **DPS 序列不可用（fail-closed）**：上游 `hk_fina_indicator.dps_hkd` 呈"
+                         f"「按公告快照」填充特征（{len(dps_values)} 期中仅 {distinct_dps} 个不同值），"
+                         f"且备用源（yfinance 股息）当前不可用 ⇒ **本表不给派息率列**，"
+                         f"**不得**由该 DPS 序列推导任何逐年派息率或「分配意愿」趋势。"
+                         f"分红绝对额请用 §5「已付股息(融资)」（现金流口径）；"
+                         f"§17.10 的 M 在 DPS 恒定时本就采用**法2（现金流口径）**，不受影响。")
         if dps_source == "yfinance":
             lines.append(f"\n*⚠️ DPS 数据来源: yfinance（Tushare dps_hkd 数据异常已替换）*")
         return "\n".join(lines)
@@ -1282,7 +1606,12 @@ class FinancialsMixin:
             high=("high", "max"),
             low=("low", "min"),
             close=("close", "last"),
-            avg_vol=("vol", "mean"),
+            # ⚠️ Tushare `weekly.vol` 的单位是**股**，而 `daily.vol` 是**手**（1 手=100 股）。
+            # 原先直接 `mean(vol)` 却把列标成「(手)」⇒ **100 倍**误标（known_issues §五十）。
+            # 实测 000708：weekly vol 均值 72,498,029 股 ÷5 = 1,450 万股/日，
+            # 而 §2 的日均 136,620 手 = 1,366 万股/日 —— 两者吻合，证实是股。
+            # 为与 §2 的「手」保持一致，这里 ÷100 换算。
+            avg_vol=("vol", lambda x: x.mean() / 100.0),
         ).reset_index()
         annual = annual.sort_values("year", ascending=False)
 
@@ -1367,7 +1696,12 @@ class FinancialsMixin:
             high=("high", "max"),
             low=("low", "min"),
             close=("close", "last"),
-            avg_vol=("vol", "mean"),
+            # ⚠️ Tushare `weekly.vol` 的单位是**股**，而 `daily.vol` 是**手**（1 手=100 股）。
+            # 原先直接 `mean(vol)` 却把列标成「(手)」⇒ **100 倍**误标（known_issues §五十）。
+            # 实测 000708：weekly vol 均值 72,498,029 股 ÷5 = 1,450 万股/日，
+            # 而 §2 的日均 136,620 手 = 1,366 万股/日 —— 两者吻合，证实是股。
+            # 为与 §2 的「手」保持一致，这里 ÷100 换算。
+            avg_vol=("vol", lambda x: x.mean() / 100.0),
         ).reset_index()
         annual = annual.sort_values("year", ascending=False)
 
@@ -1425,7 +1759,12 @@ class FinancialsMixin:
             high=("high", "max"),
             low=("low", "min"),
             close=("close", "last"),
-            avg_vol=("vol", "mean"),
+            # ⚠️ Tushare `weekly.vol` 的单位是**股**，而 `daily.vol` 是**手**（1 手=100 股）。
+            # 原先直接 `mean(vol)` 却把列标成「(手)」⇒ **100 倍**误标（known_issues §五十）。
+            # 实测 000708：weekly vol 均值 72,498,029 股 ÷5 = 1,450 万股/日，
+            # 而 §2 的日均 136,620 手 = 1,366 万股/日 —— 两者吻合，证实是股。
+            # 为与 §2 的「手」保持一致，这里 ÷100 换算。
+            avg_vol=("vol", lambda x: x.mean() / 100.0),
         ).reset_index()
         annual = annual.sort_values("year", ascending=False)
 
@@ -1569,7 +1908,7 @@ class FinancialsMixin:
             ("净利润同比增长率 (%)", "holder_profit_yoy"),
         ]
         per_share_fields = [
-            ("每股净资产 (HKD)", "bps"),
+            (f"每股净资产 ({self._per_share_unit()})", "bps"),
             ("PE (TTM)", "pe_ttm"),
             ("PB", "pb_ttm"),
         ]

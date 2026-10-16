@@ -1,0 +1,192 @@
+{
+  "schema_version": "1.0",
+  "note": [
+    "策略规则的单点（machine-readable authority）。",
+    "为什么需要它：阈值/税率/值域原先只在 markdown 里（shared_tables.md、judgment_examples_turtle.md）+",
+    "代码里手工转抄（constants.py 与 numeric_audit.py 各一份），两者之间**没有任何一致性测试**。",
+    "真实症状：II_FLOOR/II_SPREAD 在 2 个文件各自定义；factor_interface.md 的 lambda_reliability",
+    "值域写成「正常/有一项警告/异常」而代码实际产出「多项警告或异常」。",
+    "本文件是**中立权威**：代码与文档都必须与它一致（tests/test_strategy_rules.py）。",
+    "注意：不要求 numeric_audit 改为 import constants —— 它的「独立第二实现」是刻意设计",
+    "（公式重写、常量另抄），此处只加**双向一致性测试**，使漂移必被发现。"
+  ],
+  "ii_threshold": {
+    "formula": "max(II_FLOOR, Rf + II_SPREAD)",
+    "floor_pct": 5.0,
+    "spread_pct": 3.0,
+    "applies_to": [
+      "A",
+      "HK",
+      "US"
+    ],
+    "doc": "shared_tables.md:70,78",
+    "comment": "2026-10-13 项目决定：三市场统一取「港股最好档 5%」为下限；这是一次刻意的收紧，不是文档原样。"
+  },
+  "dividend_tax_q_pct": {
+    "hk_h_share_direct": 28.0,
+    "hk_h_share_connect": 20.0,
+    "hk_red_chip_direct": 20.0,
+    "hk_red_chip_connect": 20.0,
+    "hk_us_source_weighted": "weighted",
+    "a_share_gt_1y": 0.0,
+    "a_share_1m_to_1y": 10.0,
+    "a_share_lt_1m": 20.0,
+    "us_direct_no_treaty": 30.0,
+    "us_w8ben": 10.0,
+    "default_by_market": {
+      "HK": 20.0,
+      "A": 0.0,
+      "US": 10.0
+    },
+    "doc": "shared_tables.md:28-39"
+  },
+  "lambda_reliability": {
+    "normal_band": [
+      0.3,
+      2.0
+    ],
+    "anomaly_above": 3.0,
+    "anomaly_below": 0.0,
+    "vocabulary": [
+      "正常",
+      "有一项警告",
+      "多项警告或异常"
+    ],
+    "doc": "judgment_examples_turtle.md:34-38",
+    "comment": "文档 §3 写「正常 = λ 0.3-2.0」；代码把「λ>3 或 λ<0」判为异常并输出「多项警告或异常」，本值域即代码实际产出，已与 factor_interface.md 对齐。"
+  },
+  "stability_gates": {
+    "aa_window_spread_pct": 30.0,
+    "m_method_spread_pct": 15.0,
+    "doc_note": "数据包自带阈值（§17.5 窗口差提示、§17.10 三法偏差）"
+  },
+  "defensive_net_asset": {
+    "goodwill_deducted_in_both_calibers": true,
+    "intangibles_deducted_in_A_only": true,
+    "doc": "shared_tables.md 因子3 [18:47]「商誉、无形资产都是假的资产，我会把它扣除掉」"
+  },
+  "entity_basis": {
+    "note": [
+      "实体归属契约（known_issues §四十五）。",
+      "**这是声明，不是修正**：框架因子2 明文用「归母净利润」，因子3 的 AA 由合并报表的",
+      "经营现金流/资本开支构造 —— 两者口径不同，且 factor3_穿透回报率精算.md:281 已明确说",
+      "「因子3基准值 = AA，与因子2基准值 C 不同，这是粗算/精算方法论差异的正常结果」。",
+      "缺的从来不是实现，而是**把每个量的实体归属写下来**，好让下游知道自己在混用什么。",
+      "⚠️ 早先的 instrument_audit 把 AA 记为「声明归母却实现合并」——那是**我凭空造的口径**",
+      "（框架文档里没有「扣掉少数股东权益」这句话），已订正。"
+    ],
+    "quantities": {
+      "C": {
+        "label": "归母净利润",
+        "factor": 2,
+        "entity_basis": "parent",
+        "attribution_method": "as_reported",
+        "spec": "factor2 步骤1（§3 归母净利润）"
+      },
+      "B": {
+        "label": "少数股东损益",
+        "factor": 2,
+        "entity_basis": "consolidated",
+        "attribution_method": "as_reported",
+        "spec": "factor2 步骤1（§3 少数股东损益）"
+      },
+      "A": {
+        "label": "集团净利润",
+        "factor": 2,
+        "entity_basis": "consolidated",
+        "attribution_method": "as_reported",
+        "spec": "factor2 步骤1（§3 净利润）"
+      },
+      "AA": {
+        "label": "真实可支配现金结余",
+        "factor": 3,
+        "entity_basis": "consolidated",
+        "attribution_method": "as_reported",
+        "spec": "factor3 步骤7：由合并报表的真实现金收入 − 经营性现金支出 − 总扣除额构造",
+        "caveat": "**合并口径**。少数股东按持股比例分享子公司现金，故 AA 并非全部归母可得。"
+      },
+      "M": {
+        "label": "支付率",
+        "factor": 2,
+        "entity_basis": "parent",
+        "attribution_method": "as_reported",
+        "spec": "factor2 步骤1：支付率 M = DPS ÷ 归母净利润 ⇒ 归母口径"
+      },
+      "GG": {
+        "label": "穿透回报率（精算）",
+        "factor": 3,
+        "entity_basis": "mixed",
+        "attribution_method": "none",
+        "spec": "GG = AA × M × (1−Q) / 市值",
+        "caveat": "**混用口径**：分子 AA 是合并、M 是归母 ⇒ 少数股东占比越高，越过誉归母可得。披露项（本契约要求随报告披露少数股东占比与混用事实），不是数值修正。"
+      },
+      "R": {
+        "label": "穿透回报率（粗算）",
+        "factor": 2,
+        "entity_basis": "parent",
+        "attribution_method": "as_reported",
+        "spec": "R = C × M × (1−Q) / 市值（C 归母）"
+      }
+    },
+    "disclosure_rule": {
+      "when_minority_pct_gt": 5.0,
+      "must_disclose": [
+        "少数股东占比（§17.2）",
+        "AA 为合并口径、M 为归母口径（本契约 quantities.AA/M 的 caveat）",
+        "GG 因此对归母股东为**上界**"
+      ],
+      "doc": "known_issues §四十五"
+    }
+  },
+  "pessimistic_k_grid": {
+    "values_desc": [
+      1.0,
+      0.95,
+      0.9,
+      0.85,
+      0.8,
+      0.75,
+      0.7
+    ],
+    "default_star": 0.8,
+    "unit": "乘法折扣（AA_pess = AA × k）",
+    "doc": "因子2：「打八折」→0.8；「衰退>20% 按七折」→0.7；「最低值再打 8.5 折」→0.85。k=1.0 是对照行",
+    "code": "turtle_core/pessimistic.py: PESS_K_VALUES / PESS_K_DEFAULT",
+    "note": "本条是 2026-10-15 完备性扫描补入的：它此前只在代码里，未进规则单点"
+  },
+  "g_grid": {
+    "values": {
+      "start": 0.7,
+      "stop": 1.8,
+      "step": 0.1
+    },
+    "formula": "H = D×G；OE = C + D − H = C + D(1−G)",
+    "doc": "因子2 步骤：G 为维持性资本开支系数；G=1.0 为基准（OE_base）",
+    "code": "derived_metrics._compute_g_grid",
+    "note": "2026-10-15 完备性扫描补入"
+  },
+  "defensive_gates": {
+    "cash_to_mktcap_pct": {
+      "ample": 40.0,
+      "ok_floor": 30.0
+    },
+    "aa_to_mktcap_minus_netcash_pct": {
+      "ok_floor": 40.0
+    },
+    "criteria": [
+      "① 总现金 > 短期借款",
+      "② 总现金 > 流动负债合计",
+      "③ 现金储备/市值",
+      "④ AA_latest/(市值−净现金)",
+      "⑤ 净现金 > 市值",
+      "⑥ AA_latest ≥ 拟派息(C×M_rec)"
+    ],
+    "cash_calibers": {
+      "narrow": "货币资金 + 交易性金融资产",
+      "broad": "狭义 + 存款"
+    },
+    "doc": "因子2 [56:28]/[56:41]/[1:32:31]/[53:43]/[1:32:23]；因子3 [42:08]",
+    "code": "derived_metrics._compute_defensive_gates",
+    "note": "2026-10-15 完备性扫描补入"
+  }
+}

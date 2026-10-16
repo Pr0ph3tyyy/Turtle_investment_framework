@@ -10,8 +10,11 @@ Run a full Turtle Investment Framework (龟龟投资策略) analysis on stock: $
 Read strategies/turtle/coordinator.md for the full pipeline specification, then execute each phase:
 
 ### Prerequisite: Check BA outputs
-- **qualitative_report.md** — required. If missing, inform user to run `/business-analysis {stock_code}` first, then stop.
-- **data_pack_market.md** — required. If missing, same as above.
+- **qualitative_report.md** — required.
+- **data_pack_market.md** — required.
+- If either is missing → `ask_user_question`: 先运行 /business-analysis（推荐）/ 停止.
+  - 先运行 → invoke the `business-analysis` skill with {stock_code}, wait for completion, re-check prerequisites, then continue.
+  - 停止 → stop.
 - **data_pack_report.md** — optional. If missing, Agent B uses degraded mode (no PDF footnote data).
 
 ### Step A: Market Data Refresh
@@ -28,8 +31,33 @@ python3 scripts/tushare_collector.py --code $ARGUMENTS --output output/{code}_{c
   - Reads phase3_quantitative.md (from Agent B) for quantitative parameters
 - Output: output/{code}_{company}/{company}_{code}_分析报告.md
 
+### Step 3.3: Delivery gates (mandatory — any non-zero exit blocks delivery)
+
+```bash
+# (1) claim binding, fail-closed (PCN). --strict turns on the default 20% coverage floor.
+.venv/bin/python scripts/report_consistency.py \
+  --report "output/{code}_{company}/{company}_{code}_分析报告.md" \
+  --claims output/{code}_{company}/claims.json --gates --strict
+
+# (2) report-level invariants: I8 verbatim fidelity + I9 rule ordering.
+#     WITH --claims, I9 reads both operands from the ledger instead of scraping prose.
+.venv/bin/python scripts/check_report_fidelity.py \
+  --report "output/{code}_{company}/{company}_{code}_分析报告.md" \
+  --dims output/{code}_{company}/dims \
+  --claims output/{code}_{company}/claims.json --strict
+
+# (3) upstream freeze: pack + sidecars unchanged since collection
+.venv/bin/python scripts/stage_manifest.py --check output/{code}_{company}/pack_manifest.json
+```
+
+- Collection is now **fail-closed**: `tushare_collector.py` writes `gate_status.json`
+  (`deliverable` / `degraded` / `blocking[]`) and exits 1 on blocking failures
+  (`C1/C2`, `I1/I2/I4/I7/I8/I9`). Use `--allow-degraded` only to accept a defect
+  explicitly — it stamps `degraded: true`, which must be disclosed in the report.
+- Never satisfy (1) by removing numbers: omission is what the coverage floor exists to catch.
+
 ## Error Recovery
-- Missing BA outputs → stop and prompt user to run /business-analysis first
+- Missing BA outputs → `ask_user_question`: run /business-analysis first (recommended) or stop
 - Step A refresh failure → attempt yfinance fallback, then proceed with existing data
 - Missing data_pack_report.md → Agent B uses degraded mode (no footnote data)
 - Always produce a final report even if partial data

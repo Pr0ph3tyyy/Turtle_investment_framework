@@ -3,6 +3,12 @@
 > **角色**：你是项目经理。职责：(1) 验证输入并补全缺失信息；(2) 检查前置条件（定性报告）；(3) 调度 Python 计算 → LLM 定性调整；(4) 监控超时；(5) 交付最终估值报告。你不执行估值计算或数学运算。
 >
 > 本模块依赖 `/business-analysis` 的输出（qualitative_report.md + data_pack_market.md）。
+>
+> ⚠️ **本模块是通用估值参考，不属于龟龟方法论。** 龟龟策略（`strategies/turtle/`）明确
+> 不采用 DCF/DDM/PE/PEG 范式 —— 龟龟原话是「真正的投资者不应该去思考市盈率，或者说是
+> 自由现金流」，其估值锚是穿透回报率倒算买价。**当本模块结论与
+> `{公司}_{代码}_分析报告.md`（龟龟策略报告）冲突时，以龟龟报告为准。**
+> 参见 `known_issues.md` §2.6。
 
 ---
 
@@ -15,7 +21,7 @@
 **解析规则**：
 1. 代码格式化：A股 → `XXXXXX.SH/SZ`；港股 → `XXXXX.HK`；美股 → `AAPL`
 2. 若用户只给了 6 位数字 → 由 `scripts/config.py` 自动补充后缀
-3. 若模糊 → AskUserQuestion 确认
+3. 若模糊 → `ask_user_question` 确认
 
 ---
 
@@ -161,7 +167,7 @@ Python初步估值: {python_central} {币种}/股
 
 | 阶段 | 异常 | 处理 |
 |------|------|------|
-| 输入 | 代码为空 | AskUserQuestion |
+| 输入 | 代码为空 | `ask_user_question` |
 | 前置检查 | qualitative_report.md 缺失 | 停止，提示 /business-analysis |
 | 前置检查 | data_pack_market.md 缺失 | 停止，提示 /business-analysis |
 | Step 1 | TUSHARE_TOKEN 缺失 | 停止，提示设置 Token |
@@ -183,3 +189,30 @@ Python初步估值: {python_central} {币种}/股
 {qualitative}   = {output_dir}/qualitative_report.md
 {report}        = {output_dir}/{company}_{code}_估值报告.md
 ```
+
+---
+
+## 审核步骤（与龟龟/定性共用，2026-10-14）
+
+**审核一（数值，报告之前）**：`valuation_engine.py` 跑完之后、估值报告动笔之前，
+对**同一个数据包**做独立第二实现的数值审核（估值引擎的输入就是 §1–§16 + §17）：
+
+```bash
+.venv/bin/python scripts/numeric_audit.py \
+  --pack output/{code}_{company}/data_pack_market.md --output-dir output/{code}_{company}
+# 再按 shared/audit/numeric_audit_agent.md 跑裁定 → numeric_audit_verdict.md
+#   NUMERIC_AUDIT_RESULT: PASS | FIX_REQUIRED
+```
+
+**审核二（观点，报告之后）**：估值报告写完后，检查结论自洽、引用合规、上游限制是否带进结论：
+
+```bash
+.venv/bin/python scripts/viewpoint_audit.py \
+  --report "output/{code}_{company}/{company}_{code}_估值报告.md" \
+  --output-dir output/{code}_{company} --profile valuation --strict
+# 再按 shared/audit/viewpoint_audit_agent.md 跑裁定 → viewpoint_audit_verdict.md
+#   VIEWPOINT_AUDIT_RESULT: PASS | FIX_REQUIRED
+```
+
+> `--profile valuation` 会跳过龟龟专有的决策链检查（仓位矩阵/买点/门槛）—— 估值报告没有这些语义，
+> 对它们跑那一组只会得到一片 UNVERIFIABLE，在 `--strict` 下反而会阻断交付。

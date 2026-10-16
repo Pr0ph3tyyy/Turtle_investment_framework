@@ -1,6 +1,7 @@
 #!/bin/bash
 # init.sh - Turtle Investment Framework environment setup
-# Run at the start of each Claude Code session
+# Run once to bootstrap: creates .venv/, installs dependencies, verifies the env.
+# Platform-neutral (Claude Code, DeepSeek Harness, or plain shell).
 
 set -e
 

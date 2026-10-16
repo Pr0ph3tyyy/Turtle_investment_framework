@@ -102,20 +102,27 @@ class ValuationEngine:
         row = bi_df.iloc[0]
         close = self._sf(row.get("close"))
 
-        if self.market == "HK":
-            total_mv = self._sf(row.get("total_market_cap"))  # 百万港元
-            total_shares = (total_mv * 1e6 / close) if (total_mv and close) else None
-            mkt_cap_mm = total_mv
-        elif self.market == "US":
-            total_mv = self._sf(row.get("total_mv"))  # raw USD
-            total_shares = (total_mv / close) if (total_mv and close) else None
-            mkt_cap_mm = total_mv / 1e6 if total_mv else None
-        else:
-            total_mv_wan = self._sf(row.get("total_mv"))  # 万元
-            total_share_wan = self._sf(row.get("total_share"))  # 万股
-            mkt_cap_mm = total_mv_wan / 100 if total_mv_wan else None  # 百万元
-            total_shares = total_share_wan * 10000 if total_share_wan else None
-            close = close
+        # 市值 / 股本 **统一经 `_get_mktcap_shares`**（单一来源）。
+        # 旧实现让估值引擎自己再写一遍 A/HK/US 分支并用「当前市值 ÷ 当前价」反推股数：
+        # known_issues #25 修好 §17 之后，估值报告与龟龟报告会对同一只股票给出**两个股本**
+        # （06862 实测 5,735.83 vs 年报 5,574.00，差 2.90%），从而每个每股价值都偏低 ~2.8%
+        # （独立审计 F8）。这里改为消费同一个解析结果，并保留降级标记以便报告披露。
+        total_shares = None
+        mkt_cap_mm = None
+        ms = self.client._get_mktcap_shares(row.get("ts_code") or "")
+        if ms is not None:
+            cap_reporting, shares_raw, close = ms
+            mkt_cap_mm = (cap_reporting / 1e6) if cap_reporting else None
+            total_shares = shares_raw
+        elif self.market == "HK":
+            # 兜底（§17 未跑时）：仍按原始港元 → 报表币种换算
+            trading_cap = self.client._hk_market_cap_raw(row)  # raw HKD
+            total_shares = (trading_cap / close) if (trading_cap and close) else None
+            reporting_cap = trading_cap * self.client._fx_to_reporting(row.get("ts_code") or "") \
+                if trading_cap else None
+            mkt_cap_mm = reporting_cap / 1e6 if reporting_cap else None
+        sc = self.client._store.get("share_count")
+        self.share_basis = (sc.as_row_cells()[1] if sc is not None else "股本：解析失败（§17 未运行）")
 
         return {
             "close": close,
@@ -140,7 +147,8 @@ class ValuationEngine:
 
     def _interest_bearing_debt(self, row) -> float:
         total = 0.0
-        for c in ("st_borr", "lt_borr", "bond_payable", "non_cur_liab_due_1y"):
+        for c in ("st_borr", "lt_borr", "bond_payable", "non_cur_liab_due_1y",
+              "lease_liab", "lease_liab_noncur"):
             v = self._sf(row.get(c))
             if v is not None:
                 total += v
@@ -250,12 +258,20 @@ class ValuationEngine:
         mkt_cap_mm = bi.get("mkt_cap_mm") or 0
 
         # Rf
+        # ⚠️ 来源必须**如实标注**：`yc_cb` 实测无权限时，`risk_free_rate` 为空，
+        # 于是 `rf_default` 是**实际生效的路径** —— 那是**建模假设**而不是 §14 的实测值。
+        # 旧实现把两者都标成 "§14"（见下方 WACC 表），读者无法分辨 WACC/DCF 用的是
+        # 实测利率还是编出来的默认值 ⇒ 与本仓库「不得静默补数」的纪律冲突（findings D-13）。
         rf_df = self.client._store.get("risk_free_rate")
         rf = None
         if rf_df is not None and not rf_df.empty:
             rf = self._sf(rf_df.iloc[0].get("yield"))
         if rf is None:
             rf = self.params["rf_default"]
+            rf_source = (f"默认值（§14 不可用：yc_cb 无权限且未传 --rf）"
+                         f"⚠️ **非实测**，是 {self.market} 市场建模假设")
+        else:
+            rf_source = "§14"
 
         # Beta by market cap
         beta = 1.0
@@ -325,7 +341,7 @@ class ValuationEngine:
             wacc = ke * e_weight / 100 + kd_pre * (1 - tax_rate / 100) * d_weight / 100
 
         return {
-            "rf": rf, "beta": beta, "erp": erp, "ke": ke,
+            "rf": rf, "rf_source": rf_source, "beta": beta, "erp": erp, "ke": ke,
             "kd_pre": kd_pre, "tax_rate": tax_rate,
             "e_weight": e_weight, "d_weight": d_weight,
             "wacc": wacc,
@@ -1139,7 +1155,8 @@ class ValuationEngine:
         lines.append("")
         w = wacc_data
         wacc_rows = [
-            ["Rf (无风险利率)", self._fmt_pct(w["rf"]), "§14"],
+            ["Rf (无风险利率)", self._fmt_pct(w["rf"]),
+             w.get("rf_source") or "§14"],
             ["Beta", f"{w['beta']:.1f}", "市值分档"],
             ["ERP (股权风险溢价)", self._fmt_pct(w["erp"]), f"{self.market}市场默认"],
             ["**Ke (权益成本)**", f"**{self._fmt_pct(w['ke'])}**", "CAPM"],

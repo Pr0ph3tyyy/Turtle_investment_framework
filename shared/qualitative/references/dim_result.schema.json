@@ -1,0 +1,570 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://turtle-framework.local/schemas/dim_result.schema.json",
+  "title": "龟龟定性分析 · 单维度结果契约（dims/{dim}.json）v1.0",
+  "$comment": "校验失败策略（由包 2 阶段 4 的 workflow 执行）：硬失败 + 最多 2 次重试；仍失败则该维度标记 critical，由 L2 仲裁层决定是否降级出报告——不得静默继续。理由：只告警不阻断会退化成 v1 的散文交接，协作问题（信息不对称/口径漂移/漏检）会立即回归。强制校验见 tests/test_dim_result_contract.py。",
+  "description": "L1 判断层每个维度子代理的输出契约。设计原则：(1) 每个事实只有一个权威位置，禁止重复字段；(2) 所有数字必须带 source，且 source.kind 决定必须提供 ref/page/basis；(3) 在「产生点」约束值域（enum），而非事后由 Summary 统一术语；(4) 材料不足必须显式声明，不得用编造内容填充。参数名与值域严格取自 shared/qualitative/references/output_schema.md v1.2，下游兼容性见 strategies/turtle/references/factor_interface.md。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "dimension",
+    "stock_code",
+    "slice",
+    "verdict",
+    "narrative",
+    "params",
+    "key_metrics",
+    "evidence",
+    "uncertainty"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "dimension": {
+      "enum": ["D1", "D2", "D3", "D4", "D5", "D6"],
+      "description": "本文件对应的维度。params 的具体形状由该值决定。"
+    },
+    "stock_code": {
+      "type": "string",
+      "pattern": "^([0-9]{4,6}\\.(SH|SZ|HK))|([A-Z]{1,5}(\\.US)?)$"
+    },
+    "company_name": { "type": "string", "minLength": 1 },
+    "generated_at": { "type": "string", "format": "date-time" },
+
+    "slice": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "本维度实际看到的材料范围。由 dimension_slicer 生成 manifest，agent 只读不改；用于防止把『没给』当成『没有』。",
+      "required": ["provided_pages", "total_pages", "budget_chars", "used_chars", "declared_incomplete"],
+      "properties": {
+        "provided_pages": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1 },
+          "minItems": 1
+        },
+        "total_pages": { "type": "integer", "minimum": 1 },
+        "dropped_pages": { "type": "integer", "minimum": 0 },
+        "budget_chars": { "type": "integer", "minimum": 1000 },
+        "used_chars": { "type": "integer", "minimum": 0 },
+        "source": { "type": "string", "description": "如 annual_report_2025.txt 或 pdf_sections.json#MDA" },
+        "declared_incomplete": {
+          "type": "boolean",
+          "description": "切片头是否已声明『本次仅提供 N/M 页，未覆盖部分不得推断』"
+        }
+      }
+    },
+
+    "verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "本维度的一句话结论 + 置信度 + 材料状态。注意：维度主评级（如 moat_rating）不在此处镜像，只存在于 params 中——避免同一事实两处存放。",
+      "required": ["headline", "confidence", "material_status"],
+      "properties": {
+        "headline": { "type": "string", "minLength": 8 },
+        "confidence": { "enum": ["高", "中", "低"] },
+        "material_status": {
+          "enum": ["充分", "不足", "不适用"],
+          "description": "充分=材料足以支撑本维度判断（正文下限生效）；不足=材料不足以支撑（正文下限豁免，但必须给 uncertainty 与 data_insufficient flag）；不适用=本维度对该标的不适用（如 D6 未触发），必须给 not_applicable flag。"
+        }
+      }
+    },
+
+    "narrative": {
+      "type": "string",
+      "minLength": 1,
+      "description": "维度正文（CJK）。下限由 dimension 决定，沿用 output_schema.md v1.2 交付硬门槛：D1≥600、D2≥800、D6≥300（未触发可豁免）。"
+    },
+
+    "params": {
+      "type": "object",
+      "description": "维度专属结构化参数。形状由 dimension 决定；字段名与值域严格照 output_schema.md v1.2，不得改名或扩展值域。"
+    },
+
+    "key_metrics": {
+      "type": "array",
+      "description": "支撑本维度判断的关键数字。凡是数字都必须在这里出现并带 source；正文中不得出现未登记的算术结果。",
+      "items": { "$ref": "#/$defs/metric" }
+    },
+
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "description": "定性论断的原文依据。年报类依据必须给出页码与引文。",
+      "items": { "$ref": "#/$defs/evidence" }
+    },
+
+    "cross_dimension_hooks": {
+      "type": "array",
+      "description": "本维度发现但属于其它维度判断的事实。仅供 L2 仲裁层消费，不用于 agent 之间点对点通信（避免重新引入 v1 的协作问题）。",
+      "items": { "$ref": "#/$defs/hook" }
+    },
+
+    "uncertainty": {
+      "type": "array",
+      "description": "显式不确定性清单。禁止用『可能』『大概』等模糊词替代本字段。",
+      "items": { "type": "string", "minLength": 2 }
+    },
+
+    "flags": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/flag" }
+    },
+
+    "extensions": {
+      "type": "object",
+      "description": "预留扩展位。新增参数应先走 output_schema.md 版本升级流程，而非直接塞进 extensions。"
+    }
+  },
+
+  "allOf": [
+    {
+      "if": { "properties": { "dimension": { "const": "D1" } }, "required": ["dimension"] },
+      "then": { "properties": { "params": { "$ref": "#/$defs/paramsD1" } } }
+    },
+    {
+      "if": { "properties": { "dimension": { "const": "D2" } }, "required": ["dimension"] },
+      "then": { "properties": { "params": { "$ref": "#/$defs/paramsD2" } } }
+    },
+    {
+      "if": { "properties": { "dimension": { "const": "D3" } }, "required": ["dimension"] },
+      "then": { "properties": { "params": { "$ref": "#/$defs/paramsD3" } } }
+    },
+    {
+      "if": { "properties": { "dimension": { "const": "D4" } }, "required": ["dimension"] },
+      "then": { "properties": { "params": { "$ref": "#/$defs/paramsD4" } } }
+    },
+    {
+      "if": { "properties": { "dimension": { "const": "D5" } }, "required": ["dimension"] },
+      "then": { "properties": { "params": { "$ref": "#/$defs/paramsD5" } } }
+    },
+    {
+      "if": { "properties": { "dimension": { "const": "D6" } }, "required": ["dimension"] },
+      "then": { "properties": { "params": { "$ref": "#/$defs/paramsD6" } } }
+    },
+
+    {
+      "description": "硬门槛（正文下限，仅当 material_status=充分 时生效）：D1≥600、D2≥800、D3/D4/D5≥400、D6≥300（且仅当控股结构适用）。",
+      "if": {
+        "properties": {
+          "dimension": { "const": "D1" },
+          "verdict": { "properties": { "material_status": { "const": "充分" } }, "required": ["material_status"] }
+        },
+        "required": ["dimension", "verdict"]
+      },
+      "then": { "properties": { "narrative": { "minLength": 600 } } }
+    },
+    {
+      "if": {
+        "properties": {
+          "dimension": { "const": "D2" },
+          "verdict": { "properties": { "material_status": { "const": "充分" } }, "required": ["material_status"] }
+        },
+        "required": ["dimension", "verdict"]
+      },
+      "then": { "properties": { "narrative": { "minLength": 800 } } }
+    },
+    {
+      "if": {
+        "properties": {
+          "dimension": { "const": "D3" },
+          "verdict": { "properties": { "material_status": { "const": "充分" } }, "required": ["material_status"] }
+        },
+        "required": ["dimension", "verdict"]
+      },
+      "then": { "properties": { "narrative": { "minLength": 400 } } }
+    },
+    {
+      "if": {
+        "properties": {
+          "dimension": { "const": "D4" },
+          "verdict": { "properties": { "material_status": { "const": "充分" } }, "required": ["material_status"] }
+        },
+        "required": ["dimension", "verdict"]
+      },
+      "then": { "properties": { "narrative": { "minLength": 400 } } }
+    },
+    {
+      "if": {
+        "properties": {
+          "dimension": { "const": "D5" },
+          "verdict": { "properties": { "material_status": { "const": "充分" } }, "required": ["material_status"] }
+        },
+        "required": ["dimension", "verdict"]
+      },
+      "then": { "properties": { "narrative": { "minLength": 400 } } }
+    },
+    {
+      "if": {
+        "properties": {
+          "dimension": { "const": "D6" },
+          "verdict": { "properties": { "material_status": { "const": "充分" } }, "required": ["material_status"] },
+          "params": { "properties": { "holding_structure": { "const": true } }, "required": ["holding_structure"] }
+        },
+        "required": ["dimension", "verdict", "params"]
+      },
+      "then": { "properties": { "narrative": { "minLength": 300 } } }
+    },
+
+    {
+      "description": "D6 未触发（holding_structure=false）⇒ 材料状态必须是『不适用』；触发时不得为『不适用』。",
+      "if": {
+        "properties": {
+          "dimension": { "const": "D6" },
+          "params": { "properties": { "holding_structure": { "const": false } }, "required": ["holding_structure"] }
+        },
+        "required": ["dimension", "params"]
+      },
+      "then": {
+        "properties": {
+          "verdict": { "properties": { "material_status": { "const": "不适用" } } }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dimension": { "const": "D6" },
+          "params": { "properties": { "holding_structure": { "const": true } }, "required": ["holding_structure"] }
+        },
+        "required": ["dimension", "params"]
+      },
+      "then": {
+        "properties": {
+          "verdict": { "properties": { "material_status": { "enum": ["充分", "不足"] } } }
+        }
+      }
+    },
+
+    {
+      "description": "材料不足时必须留痕：uncertainty 非空 + 带 data_insufficient flag。",
+      "if": {
+        "properties": { "verdict": { "properties": { "material_status": { "const": "不足" } }, "required": ["material_status"] } },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "uncertainty": { "minItems": 1 },
+          "flags": {
+            "contains": {
+              "type": "object",
+              "properties": { "code": { "const": "data_insufficient" } },
+              "required": ["code"]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "不适用时必须留痕：带 not_applicable flag。",
+      "if": {
+        "properties": { "verdict": { "properties": { "material_status": { "const": "不适用" } }, "required": ["material_status"] } },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "flags": {
+            "contains": {
+              "type": "object",
+              "properties": { "code": { "const": "not_applicable" } },
+              "required": ["code"]
+            }
+          }
+        }
+      }
+    },
+
+    {
+      "description": "若切片被截断（dropped_pages>0），必须带 slice_truncated flag。",
+      "if": {
+        "properties": { "slice": { "properties": { "dropped_pages": { "minimum": 1 } }, "required": ["dropped_pages"] } },
+        "required": ["slice"]
+      },
+      "then": {
+        "properties": {
+          "flags": {
+            "contains": {
+              "type": "object",
+              "properties": { "code": { "const": "slice_truncated" } },
+              "required": ["code"]
+            }
+          }
+        }
+      }
+    }
+  ],
+
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "来源标注。取代正文里的自由文本 [src: ...] 写法，使来源可被程序校验。",
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "enum": ["computed_metrics", "data_pack", "annual_report", "web_search", "inference"],
+          "description": "computed_metrics=CM§N；data_pack=DP§N；annual_report=年报页码；web_search=检索式；inference=模型推断"
+        },
+        "ref": { "type": "string" },
+        "page": { "type": "integer", "minimum": 1 },
+        "basis": { "type": "string", "description": "web_search 必须给检索式；inference 必须给推断依据" },
+        "url": { "type": "string", "format": "uri" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "computed_metrics" } }, "required": ["kind"] },
+          "then": { "required": ["ref"], "properties": { "ref": { "pattern": "^CM§[1-5]$" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "data_pack" } }, "required": ["kind"] },
+          "then": { "required": ["ref"], "properties": { "ref": { "pattern": "^DP§[0-9]{1,2}[A-Z]?(\\.[0-9]{1,2})?$" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "annual_report" } }, "required": ["kind"] },
+          "then": { "required": ["page"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "inference" } }, "required": ["kind"] },
+          "then": { "required": ["basis"], "properties": { "ref": { "const": "推断" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "web_search" } }, "required": ["kind"] },
+          "then": { "required": ["basis"] }
+        }
+      ]
+    },
+
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value", "source"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "value": {
+          "type": ["number", "null"],
+          "description": "null = 不可得（对应 output_schema『不可得填 null 并注明』）。此时 note 必填。"
+        },
+        "unit": { "enum": ["百万元", "百万港元", "百万美元", "万元", "元", "元/股", "%", "倍", "股", "份", "—"] },
+        "year": { "type": ["integer", "string", "null"] },
+        "note": { "type": "string" },
+        "source": { "$ref": "#/$defs/source" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "value": { "type": "null" } }, "required": ["value"] },
+          "then": { "required": ["note"] }
+        }
+      ]
+    },
+
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claim", "source"],
+      "properties": {
+        "claim": { "type": "string", "minLength": 4 },
+        "quote": { "type": "string", "description": "原文引文（年报类必填，便于 clean-room 复核）" },
+        "source": { "$ref": "#/$defs/source" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "source": { "properties": { "kind": { "const": "annual_report" } }, "required": ["kind"] } }, "required": ["source"] },
+          "then": { "required": ["quote"] }
+        }
+      ]
+    },
+
+    "hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "fact", "why"],
+      "properties": {
+        "target": {
+          "enum": ["D1", "D2", "D3", "D4", "D5", "D6", "L2"],
+          "description": "该事实影响哪个维度；L2 决定是否需要在综合阶段裁决"
+        },
+        "fact": { "type": "string", "minLength": 4 },
+        "why": { "type": "string", "minLength": 4 },
+        "source": { "$ref": "#/$defs/source" }
+      }
+    },
+
+    "flag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity"],
+      "properties": {
+        "code": {
+          "enum": [
+            "data_insufficient",
+            "slice_truncated",
+            "source_conflict",
+            "enum_forced",
+            "shared_prefix_conflict",
+            "not_applicable",
+            "other"
+          ]
+        },
+        "severity": { "enum": ["info", "warn", "critical"] },
+        "detail": { "type": "string" }
+      }
+    },
+
+    "monitor_kpi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kpi", "threshold"],
+      "properties": {
+        "kpi": { "type": "string", "minLength": 2 },
+        "current": { "type": ["string", "number", "null"] },
+        "threshold": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "competitor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "ticker": { "type": ["string", "null"] }
+      }
+    },
+
+    "governance_flag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["flag_name", "status"],
+      "properties": {
+        "flag_name": { "type": "string", "minLength": 2 },
+        "status": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "paramsD1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["business_model_clarity", "capital_intensity", "collection_mode", "cash_impact"],
+      "properties": {
+        "business_model_clarity": { "enum": ["清晰且已验证", "清晰但未充分验证", "模糊"] },
+        "capital_intensity": { "enum": ["capital-light", "capital-hungry"] },
+        "collection_mode": { "enum": ["先款后货", "订阅预收", "先货后款", "垫资回收"] },
+        "cash_impact": { "enum": ["正贡献", "中性", "负担"] }
+      }
+    },
+
+    "paramsD2": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "D2 的 4 项评级为交付硬门槛必填项（output_schema.md v1.2）。",
+      "required": [
+        "market_structure",
+        "entry_barrier",
+        "moat_existence",
+        "moat_type",
+        "moat_rating",
+        "supply_side_rating",
+        "demand_side_rating",
+        "scale_economy_rating"
+      ],
+      "properties": {
+        "market_structure": { "enum": ["垄断", "寡头", "垄断竞争", "充分竞争"] },
+        "market_cr4": { "type": ["number", "null"] },
+        "entry_barrier": { "enum": ["高", "中", "低"] },
+        "roe_5y_avg": { "type": ["number", "null"] },
+        "moat_existence": { "enum": ["存在", "可能存在", "不存在"] },
+        "moat_evidence_strength": { "enum": ["强证据", "中等证据", "弱证据"] },
+        "moat_type": { "type": "string", "minLength": 4 },
+        "moat_framework_primary": { "enum": ["A", "B"] },
+        "supply_side_rating": { "enum": ["强", "较强", "中等", "弱", "不适用"] },
+        "demand_side_rating": { "enum": ["强", "较强", "中等", "弱", "不适用"] },
+        "scale_economy_rating": { "enum": ["强", "较强", "中等", "弱", "不适用"] },
+        "moat_flywheel": { "type": "boolean" },
+        "false_advantages": { "type": "array", "items": { "type": "string", "minLength": 2 } },
+        "competitors": { "type": "array", "items": { "$ref": "#/$defs/competitor" } },
+        "competitor_ranking": { "type": ["string", "null"] },
+        "advantage_gap_sustainability": { "enum": ["高", "中", "低"] },
+        "pricing_power": { "enum": ["强", "中", "弱"] },
+        "human_capital_dep": { "enum": ["系统型", "人才型"] },
+        "moat_sustainability": { "enum": ["高可持续", "中等可持续", "低可持续"] },
+        "moat_rating": { "enum": ["强", "较强", "中", "弱"] },
+        "moat_monitor_kpis": { "type": "array", "items": { "$ref": "#/$defs/monitor_kpi" } }
+      }
+    },
+
+    "paramsD3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cyclicality", "cycle_position", "regulatory_risk", "industry_keywords"],
+      "properties": {
+        "cyclicality": { "enum": ["强周期", "弱周期", "非周期"] },
+        "cycle_position": { "enum": ["底部", "中段", "顶部", "不适用"] },
+        "regulatory_risk": { "enum": ["低", "中", "高"] },
+        "industry_keywords": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      },
+      "allOf": [
+        {
+          "description": "仅强周期适用具体周期位置；非强周期必须为『不适用』。",
+          "if": { "properties": { "cyclicality": { "enum": ["弱周期", "非周期"] } }, "required": ["cyclicality"] },
+          "then": { "properties": { "cycle_position": { "const": "不适用" } } }
+        }
+      ]
+    },
+
+    "paramsD4": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["governance_flags", "management_rating", "capital_allocation_record", "related_party_risk"],
+      "properties": {
+        "governance_flags": { "type": "array", "items": { "$ref": "#/$defs/governance_flag" } },
+        "management_rating": { "enum": ["优秀", "合格", "损害价值", "观察期"] },
+        "capital_allocation_record": { "type": "string", "minLength": 4 },
+        "related_party_risk": { "enum": ["低", "中", "高"] }
+      }
+    },
+
+    "paramsD5": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mda_credibility", "mda_impact", "mda_forward_guidance", "distribution_signal"],
+      "properties": {
+        "mda_credibility": { "enum": ["高", "中", "低"] },
+        "mda_impact": { "enum": ["正面", "中性", "负面"] },
+        "mda_forward_guidance": { "enum": ["有量化", "仅方向性", "无"] },
+        "distribution_signal": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "paramsD6": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["holding_structure", "sotp_value_mm", "sotp_discount_pct"],
+      "properties": {
+        "holding_structure": { "type": "boolean" },
+        "sotp_value_mm": { "type": ["number", "null"] },
+        "sotp_discount_pct": { "type": ["number", "null"] }
+      },
+      "allOf": [
+        {
+          "description": "不适用控股结构时，两个 SOTP 值必须为 null（不得留空、不得填 0）。",
+          "if": { "properties": { "holding_structure": { "const": false } }, "required": ["holding_structure"] },
+          "then": {
+            "properties": {
+              "sotp_value_mm": { "type": "null" },
+              "sotp_discount_pct": { "type": "null" }
+            }
+          }
+        },
+        {
+          "description": "适用控股结构时必须给出 SOTP 数值。",
+          "if": { "properties": { "holding_structure": { "const": true } }, "required": ["holding_structure"] },
+          "then": {
+            "properties": {
+              "sotp_value_mm": { "type": "number" },
+              "sotp_discount_pct": { "type": "number" }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

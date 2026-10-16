@@ -86,9 +86,14 @@
 | GG_source | string | 步骤10 | GG 来源：§17.11 表B AA_x×法y @ Q=z% / 手算降级 |
 | M_source | string | 步骤10 | M 来源：§17.10 法1/法2/法3 M_rec / 手算降级 |
 | target_buy_price | float | 步骤10 | 目标买入价（§17.11 默认Q = 当前股价×GG/II） |
+| claim_id | string | 步骤10 | 引用 §17 数值时的 claim 绑定 id（见 `claims.json`；引用必须写成 `<claim id="…">值</claim>`） |
+| k_selected | float | 步骤10 | 悲观折扣档（§17.14，Agent 选定，默认建议 0.80） |
+| GG_pess_pct | float | 步骤10 | 悲观档精算穿透回报率（§17.14 表A，**决策口径**） |
+| target_buy_price_pess | float | 步骤10 | 悲观档目标买入价（§17.14 表A） |
+| M_pess_pct | float | 步骤10 | 悲观支付率 = §17.10 各法3年均值最低者 |
 | HH_pct | float | 步骤10 | 粗算偏差 R − GG |
 | lambda_coeff | float | 步骤10 | 经营杠杆系数 |
-| lambda_reliability | enum | 步骤10 | 正常/有一项警告/异常 |
+| lambda_reliability | enum | 步骤10 | 正常/有一项警告/多项警告或异常 |
 | credibility | enum | 步骤11 | 外推可信度（高/中/低） |
 | payout_willingness | enum | 步骤5 | 分配意愿（强/中/弱） |
 | FF_mm | float | 步骤9 | 可自由支配现金 |

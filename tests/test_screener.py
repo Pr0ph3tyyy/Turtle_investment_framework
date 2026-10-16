@@ -1286,6 +1286,98 @@ class TestCompositeScoring:
         result = screener._compute_rankings(pd.DataFrame())
         assert result.empty
 
+    # --- 方案 1-B: missing-value policy -------------------------------
+
+    def test_nan_does_not_receive_top_percentile(self, tmp_path):
+        """Regression: NaN used to rank BEST (na_option bottom/top).
+
+        A stock with a missing dimension must never outrank a fully measured
+        one on the strength of the missing value itself.
+        """
+        screener = _make_screener(tmp_path)
+        df = pd.DataFrame({
+            "ts_code": ["MISS.SH", "OK.SH"],
+            "roe_waa": [None, 12.0],
+            "fcf_yield": [1.0, 1.0],
+            "R": [1.0, 1.0],
+            "ev_ebitda": [1.0, 1.0],
+            "floor_premium": [1.0, 1.0],
+        })
+        result = screener._compute_rankings(df)
+        miss = result[result["ts_code"] == "MISS.SH"].iloc[0]
+        assert pd.isna(miss["roe_waa_pctile"]), "NaN must not be ranked"
+        # ...and therefore cannot be rank_eligible / top of the list
+        assert result.iloc[0]["ts_code"] == "OK.SH"
+        assert not bool(miss["rank_eligible"])
+
+    def test_weights_renormalise_over_available_dimensions(self, tmp_path):
+        """A 4/5-coverage row is scored on the dimensions it actually has."""
+        screener = _make_screener(tmp_path)
+        df = pd.DataFrame({
+            "ts_code": ["A.SH", "B.SH"],
+            "roe_waa": [20.0, 10.0],
+            "fcf_yield": [9.0, 3.0],
+            "R": [6.0, 2.0],
+            "ev_ebitda": [None, 12.0],
+            "floor_premium": [10.0, 60.0],
+        })
+        result = screener._compute_rankings(df)
+        a = result[result["ts_code"] == "A.SH"].iloc[0]
+        assert a["score_coverage"] == 4
+        assert a["rank_eligible"]
+        assert a["data_incomplete"]            # a metric is genuinely missing
+        assert not pd.isna(a["composite_score"])  # but it is still scored
+
+    def test_low_coverage_is_flagged_and_listed_last(self, tmp_path):
+        """Below min_score_coverage -> data_incomplete, no rank, sorted last."""
+        screener = _make_screener(tmp_path)
+        df = pd.DataFrame({
+            "ts_code": ["THIN.SH", "FULL.SH"],
+            "roe_waa": [None, 15.0],
+            "fcf_yield": [None, 6.0],
+            "R": [5.0, 5.0],
+            "ev_ebitda": [None, 8.0],
+            "floor_premium": [None, 20.0],
+        })
+        result = screener._compute_rankings(df)
+        assert result.iloc[-1]["ts_code"] == "THIN.SH"
+        thin = result[result["ts_code"] == "THIN.SH"].iloc[0]
+        assert thin["score_coverage"] == 1
+        assert not bool(thin["rank_eligible"])
+        assert bool(thin["data_incomplete"])
+        assert pd.isna(thin["composite_score"])
+
+    def test_missing_gate_field_excludes_from_ranking(self, tmp_path):
+        """A missing financial-quality gate field must not count as a pass."""
+        screener = _make_screener(tmp_path)
+        df = pd.DataFrame({
+            "ts_code": ["GATE.SH", "OK.SH"],
+            "roe_waa": [20.0, 20.0],
+            "fcf_yield": [9.0, 9.0],
+            "R": [6.0, 6.0],
+            "ev_ebitda": [5.0, 5.0],
+            "floor_premium": [10.0, 10.0],
+            "missing_gate_fields_count": [1, 0],
+        })
+        result = screener._compute_rankings(df)
+        gate = result[result["ts_code"] == "GATE.SH"].iloc[0]
+        assert gate["score_coverage"] == 5      # all scoring dims present...
+        assert not bool(gate["rank_eligible"])  # ...but a gate field is missing
+        assert bool(gate["data_incomplete"])
+
+    def test_missing_gate_fields_do_not_veto_quality_check(self, tmp_path):
+        """1-B: missing gate fields still pass, but are reported."""
+        screener = _make_screener(tmp_path)
+        fina_df = pd.DataFrame({
+            "ts_code": ["A.SH"], "end_date": ["20251231"],
+            "roe_waa": [float("nan")], "grossprofit_margin": [float("nan")],
+            "debt_to_assets": [50.0], "profit_dedt": [1e8],
+        })
+        screener._safe_call = MagicMock(return_value=fina_df)
+        passed, metrics = screener._check_financial_quality("A.SH")
+        assert passed  # not vetoed (data availability != financial quality)
+        assert metrics["missing_gate_fields"] == ["roe_waa", "grossprofit_margin"]
+
     def test_weight_application(self, tmp_path):
         """Verify weights actually affect the scoring."""
         cfg = ScreenerConfig(weight_roe=1.0, weight_fcf_yield=0.0,

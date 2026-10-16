@@ -23,7 +23,12 @@ ENV/
 !.claude/commands/
 !.claude/skills/
 .claude/commands/report-to-html.md
-.agents/
+
+# Agent-agnostic skills — DSH discovers skills from .agents/skills/<name>/SKILL.md,
+# so this directory MUST be committed (otherwise a fresh clone gets a dangling
+# .claude/skills/tushare symlink and the skill silently disappears).
+.agents/*
+!.agents/skills/
 
 # OS
 .DS_Store

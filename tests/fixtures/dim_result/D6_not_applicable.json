@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.0",
+  "dimension": "D6",
+  "stock_code": "002984.SZ",
+  "company_name": "青岛森麒麟轮胎股份有限公司",
+  "generated_at": "2026-10-13T02:31:00+08:00",
+  "slice": {
+    "provided_pages": [
+      1
+    ],
+    "total_pages": 175,
+    "dropped_pages": 0,
+    "budget_chars": 12000,
+    "used_chars": 900,
+    "source": "data_pack_market.md",
+    "declared_incomplete": false
+  },
+  "verdict": {
+    "headline": "非投资控股结构，D6 不适用",
+    "confidence": "高",
+    "material_status": "不适用"
+  },
+  "narrative": "公司为单一实体制造企业，母公司与合并口径不存在重大差异，D6 控股结构分析不适用。",
+  "params": {
+    "holding_structure": false,
+    "sotp_value_mm": null,
+    "sotp_discount_pct": null
+  },
+  "key_metrics": [
+    {
+      "name": "母公司长期股权投资占总资产",
+      "value": 3.1,
+      "unit": "%",
+      "year": 2025,
+      "source": {
+        "kind": "data_pack",
+        "ref": "DP§4P"
+      }
+    }
+  ],
+  "evidence": [
+    {
+      "claim": "D6 触发条件未满足：母公司长期股权投资占比低于 50%，且年报未涉及上市子公司",
+      "source": {
+        "kind": "data_pack",
+        "ref": "DP§4P"
+      }
+    }
+  ],
+  "uncertainty": [],
+  "flags": [
+    {
+      "code": "not_applicable",
+      "severity": "info",
+      "detail": "holding_structure=false"
+    }
+  ]
+}

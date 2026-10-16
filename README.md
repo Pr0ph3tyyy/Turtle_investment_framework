@@ -2,23 +2,23 @@
 
 AI 辅助的 A 股/港股/美股基本面分析系统。混合架构：Python 脚本完成确定性数据采集，LLM 提示词驱动定性分析与多因子评估。
 
-> **当前版本：v2.0-beta** — PDF-first 单 Agent 架构 + 独立估值模块 + Pre-flight 合并 + 实战验证。详见 [CHANGELOG_V2.md](CHANGELOG_V2.md)。
+> **当前版本：v3** — 定性分析改为**切片 + 六维度并行 + 契约化交接**（取代 PDF-first 单 Agent 全文载入）。详见 [CHANGELOG_V2.md](CHANGELOG_V2.md)。
 
 ## 核心功能
 
 | 模块 | 名称 | 实现方式 | 说明 |
 |------|------|----------|------|
 | 龟龟策略 | 穿透回报率 + 估值 | 共享定性 + 专属定量 | 完整四因子分析 → 买入/观察/规避 |
-| 商业分析 | 6 维度定性评估 | PDF-first 单 Agent | 年报 PDF 作主数据源 + Greenwald 护城河 |
+| 商业分析 | 6 维度定性评估 | 切片 + 并行子代理 + 契约 | 按维度切片 → 6 个并行子代理 → 综合；Greenwald 护城河 |
 | 估值分析 | 多方法估值 | Python 引擎 + LLM | DCF/DDM/PE Band/PEG/PS 自动分类 |
-| 数据采集 | Tushare + WebSearch | Python + Agent | A/港/美股，24+ API，5 年财务数据 |
+| 数据采集 | Tushare + web_search | Python + Agent | A/港/美股，24+ API，5 年财务数据 |
 | 年报解析 | PDF 章节提取 | Python / pdfplumber | 7 个目标章节 + 附注精提取 |
 | 选股器 | 龟龟选股器 | Python / 两级筛选 | Tier 1 批量过滤 + Tier 2 深度分析 |
 | 报告输出 | MD + HTML 双输出 | Jinja2 模板 | 暗色模式、KPI 卡片、语义色彩标签 |
 
-## 系统架构 (v2.0)
+## 系统架构 (v3)
 
-v2.0 采用 **共享模块 + 策略专属模块** 的分层架构，定性分析可独立运行或被不同策略复用。
+v3 沿用 **共享模块 + 策略专属模块** 的分层架构（定性分析可独立运行，也被龟龟/估值策略复用），并把定性分析从「单 Agent 全文载入」改为「**切片 + 六维度并行 + 契约化交接**」。
 
 ### 龟龟策略完整流程
 
@@ -26,7 +26,7 @@ v2.0 采用 **共享模块 + 策略专属模块** 的分层架构，定性分析
 用户输入 (股票代码 + 年报PDF)
          │
     ┌────▼────┐
-    │ Phase 0 │  自动下载年报 (/download-report)
+    │ Phase 0 │  自动下载年报 (/download-annual-report)
     └────┬────┘
          │
     ┌────▼────┬──────────────┐
@@ -37,7 +37,7 @@ v2.0 采用 **共享模块 + 策略专属模块** 的分层架构，定性分析
          │           │
     ┌────▼────┐      │
     │Phase 1B │      │
-    │WebSearch│      │
+    │web_search│      │
     └────┬────┘      │
          │      ┌────▼────┐
          │      │Phase 2B │
@@ -53,7 +53,10 @@ v2.0 采用 **共享模块 + 策略专属模块** 的分层架构，定性分析
      output/{code}_分析报告.md + .html
 ```
 
-### 独立商业分析流程（PDF-first 单 Agent）
+### 独立商业分析流程（切片 + 六维度并行 + 综合）
+
+> Claude Code 用 `/business-analysis {code}`；DeepSeek Harness 用 `business-analysis` skill或直接读
+> `shared/qualitative/coordinator.md`（见 [AGENTS.md](AGENTS.md)）。
 
 ```
 /business-analysis {code}
@@ -66,22 +69,23 @@ v2.0 采用 **共享模块 + 策略专属模块** 的分层架构，定性分析
     │ Tushare 数据采集     │  历史序列补充（§1–§17）
     └────┬────────────────┘
          │
-    ┌────▼────────────────┐
-    │ 单 Agent 定性分析    │  PDF 直接载入 1M context
-    │ D1–D6 全维度        │  交叉验证优于多 Agent 拆分
-    └────┬────────────────┘
+    ┌────▼────────────────────────┐
+    │ 切片 + 6 维度并行 + 综合      │  dimension_slicer → slices/
+    │ D1–D6 契约化 JSON → 报告      │  每维 ≤12K 字符，契约校验
+    └────┬────────────────────────┘
          │
     report.md + report.html
 ```
 
 ### 各阶段角色
 
-- **Phase 0** — 调用 `/download-report` 命令自动搜索并下载最新年报 PDF
-- **Phase 1A** — `tushare_collector.py` 通过 Tushare Pro API 采集结构化数据，输出 `data_pack_market.md`（含 §1–§17 共 17 个数据段）
-- **Phase 1B** — Agent 执行 WebSearch 补充治理/行业/子公司等非结构化信息
+- **Phase 0** — 调用 `/download-annual-report`（或 `download-annual-report` skill）自动搜索并下载最新年报 PDF
+- **Phase 1A** — `tushare_collector.py` 通过 Tushare Pro API 采集结构化数据，输出 `data_pack_market.md`（顶层 §1–§17；§8/§10 为待补占位符）
+- **Phase 1B** — Agent 执行 web_search 补 §8 行业与竞争 / §10 管理层讨论等非结构化信息
 - **Phase 2A** — `pdf_preprocessor.py` 使用关键词匹配定位年报 7 个目标章节，输出 `pdf_sections.json`
 - **Phase 2B** — Agent 从 PDF 章节中精确提取附注数据
-- **Phase 3** — 定性分析（PDF-first 单 Agent）+ 定量分析（含 Pre-flight Step 0）+ 估值（龟龟专属），输出 MD + HTML 双格式报告
+- **Step 2** — `dimension_slicer.py` 按目录/章节切片（预算硬上限）→ 6 个维度子代理并行产出契约化 JSON（`validate_dim_result.py` 硬校验）→ 综合代理只读 JSON 组装报告
+- **Phase 3** — 定性分析（切片并行）+ 定量分析（含 Pre-flight Step 0）+ 估值（龟龟专属），输出 MD + HTML 双格式报告
 
 ## 快速开始
 
@@ -90,7 +94,7 @@ v2.0 采用 **共享模块 + 策略专属模块** 的分层架构，定性分析
 - Python >= 3.10
 - [Tushare Pro](https://tushare.pro/) 账号及 API Token
 - （可选）pdfplumber 用于 PDF 解析
-- （内置）`/download-report` 命令用于自动下载年报
+- （内置）`/download-annual-report` 命令（DSH 下为 `download-annual-report` skill）用于自动下载年报
 
 ### 安装
 
@@ -138,16 +142,19 @@ export TUSHARE_TOKEN='your_token_here'
 
 ### 单股分析
 
-在 [Claude Code](https://claude.com/claude-code) 中使用 slash command：
+**DeepSeek Harness（推荐）**：读 [AGENTS.md](AGENTS.md) 按流程执行，或直接调用同名 skill
+（`turtle-analysis` / `business-analysis` / `valuation` / `tushare` / `download-annual-report`）。
+
+**Claude Code**：使用 slash command（与 coordinator.md 保持同步）：
 
 ```
 /turtle-analysis 600887          # 完整龟龟策略（定性 + 定量 + 估值）
-/business-analysis 600887        # 独立商业分析（PDF-first 6维度定性评估）
+/business-analysis 600887        # 独立商业分析（切片 + 六维度并行）
 /valuation 600887                # 独立估值分析（自动分类 + 多方法估值）
 ```
 
 `/turtle-analysis` 自动执行 Phase 0 → 1A → 1B → 2A → 2B → 3 完整流程。
-`/business-analysis` PDF-first 单 Agent 定性分析（年报 PDF + Tushare 数据）。
+`/business-analysis` 切片 + 六维度并行定性分析（年报切片 + Tushare 数据 + 契约校验）。
 `/valuation` 独立估值分析，需先运行 `/business-analysis`（依赖定性报告 + 市场数据）。
 
 ### 数据采集（仅 Phase 1A）
@@ -157,10 +164,17 @@ export TUSHARE_TOKEN='your_token_here'
 .venv/bin/python scripts/tushare_collector.py --code 600887.SH
 
 # 指定输出路径
-.venv/bin/python scripts/tushare_collector.py --code 600887.SH --output output/data_pack_market.md
+.venv/bin/python scripts/tushare_collector.py --code 600887.SH \
+  --output output/600887_伊利股份/data_pack_market.md
 
 # 附加额外字段
 .venv/bin/python scripts/tushare_collector.py --code 00700.HK --extra-fields balancesheet.defer_tax_assets
+
+# 仅刷新行情相关小节（保留人工补充的 §14）
+.venv/bin/python scripts/tushare_collector.py --code 600887.SH --refresh-market
+
+# 无 yc_cb 权限时显式指定无风险利率（或设 TUSHARE_RF）
+.venv/bin/python scripts/tushare_collector.py --code 600887.SH --rf 1.688
 
 # 试运行（不调用 API）
 .venv/bin/python scripts/tushare_collector.py --code 600887 --dry-run
@@ -171,21 +185,24 @@ export TUSHARE_TOKEN='your_token_here'
 | 段号 | 内容 | 来源 |
 |------|------|------|
 | §1 | 基本信息 | stock_basic + daily_basic |
-| §2 | 行情数据（52 周范围） | pro_bar weekly |
+| §2 | 市场行情（52 周范围） | pro_bar weekly |
 | §3 | 合并利润表（5 年） | income |
-| §3P | 母公司利润表 | income (report_type=4) |
+| §3P | 母公司利润表 | income (report_type=6) |
 | §4 | 合并资产负债表（5 年） | balancesheet |
-| §4P | 母公司资产负债表 | balancesheet (report_type=4) |
-| §5 | 合并现金流量表 + FCF | cashflow |
+| §4P | 母公司资产负债表 | balancesheet (report_type=6) |
+| §5 | 现金流量表 + FCF | cashflow |
 | §6 | 分红历史 | dividend |
-| §7–§10 | 占位符（WebSearch 补充） | Phase 1B |
-| §11 | 周线数据（10 年） | weekly |
-| §12 | 财务指标（ROE/毛利率等） | fina_indicator |
-| §13 | 风险警告 | 自动检测 + Agent |
-| §14 | 无风险利率 | yc_cb |
+| §7 | 股东与治理（部分） | top10_holders |
+| §8 | 行业与竞争 | **占位符 → Phase 1B（web_search）** |
+| §9 | 主营业务构成 | fina_mainbz |
+| §10 | 管理层讨论与分析 | **占位符 → Phase 1B（web_search）** |
+| §11 | 十年周线行情 | weekly |
+| §12 | 关键财务指标（ROE/毛利率等） | fina_indicator |
+| §13 | 风险警示 | 自动检测 + Agent 补充 |
+| §14 | 无风险利率 | yc_cb（无权限时用 `--rf` / `TUSHARE_RF` / 回读） |
 | §15 | 股份回购 | repurchase |
 | §16 | 股权质押 | pledge_stat |
-| §17 | 衍生指标预计算 | compute_derived_metrics |
+| §17 | 衍生指标预计算（Python，含 17.x 小节） | compute_derived_metrics |
 
 ### 年报解析（仅 Phase 2A）
 
@@ -242,104 +259,79 @@ cd notebooks
 jupyter notebook screener.ipynb
 ```
 
-Notebook 包含 7 个 Cell：初始化 → Tier 1 过滤 → 排名 → Tier 2 分析 → 评分 → 导出 → 个股详情，附 matplotlib 可视化图表。
+`screener.ipynb`（17 个 Cell）：初始化 → Tier 1 过滤 → 排名 → Tier 2 分析 → 评分 → 导出 → 个股详情，附 matplotlib 可视化；`screener_hk.ipynb` 为港股版本。
 
 ## 项目结构
 
 ```
 Turtle_investment_framework/
-├── shared/                        # 共享模块（v2.0）
-│   └── qualitative/               # 通用定性分析模块
-│       ├── coordinator.md          #   v1 入口（Agent Team）
-│       ├── coordinator_v2.md       #   v2 入口（PDF-first 单 Agent）
-│       ├── qualitative_assessment.md #   v1 6维度分析 prompt
-│       ├── qualitative_assessment_v2.md # v2 PDF-first prompt
-│       ├── data_collection.md      #   轻量级 WebSearch 指令
-│       ├── agents/                 #   Agent Team prompts（v1 保留）
-│       │   ├── agent_a_d1d2.md     #     D1(商业模式)+D2(护城河)
-│       │   ├── agent_b_d3d4d5.md   #     D3(外部)+D4(管理层)+D5(MD&A)
-│       │   ├── agent_summary.md    #     总结 Agent
-│       │   └── writing_style.md    #     共享写作风格
-│       ├── references/             #   参考文档
-│       │   ├── output_schema.md    #     结构化参数输出 schema
-│       │   ├── judgment_examples.md #    护城河/MD&A/管理层锚点
-│       │   ├── framework_guide.md  #     Greenwald 框架说明
-│       │   └── market_rules_*.md   #     港/美股规则（条件加载）
-│       └── templates/
-│           └── dashboard.html      #   HTML 仪表盘模板
-├── strategies/                    # 策略专属模块（v2.0）
-│   ├── turtle/                    # 龟龟策略
-│   │   ├── coordinator.md          #   入口（/turtle-analysis）
-│   │   ├── phase1_数据采集.md       #   数据采集指令
-│   │   ├── phase2_PDF解析.md        #   PDF 解析指令
-│   │   ├── phase3_preflight.md     #   数据校验 + 会计锚定（已合并至 quantitative）
-│   │   ├── phase3_quantitative.md  #   Pre-flight Step 0 + 穿透回报率（11步）
-│   │   ├── phase3_valuation.md     #   估值 + 报告组装
-│   │   └── references/             #   策略专属参考
-│   │       ├── shared_tables.md    #     税表/阈值/分配公式
-│   │       ├── factor_interface.md #     Agent 间参数传递 schema
-│   │       └── judgment_examples_turtle.md # G系数/分配/λ锚点
-│   └── valuation/                 # 独立估值模块
-│       ├── coordinator.md          #   入口（/valuation）
-│       ├── phase2_valuation.md     #   估值方法 + 报告组装
-│       └── references/
-│           ├── classification_rules.md #  公司类型分类阈值
-│           ├── valuation_methods.md #    DCF/DDM/PE Band/PEG/PS 公式
-│           ├── valuation_examples.md #   计算示例
-│           └── report_template.md  #     报告模板
-├── scripts/                       # Python 脚本
-│   ├── config.py                  #   配置工具（Token、股票代码验证）
-│   ├── format_utils.py            #   格式化工具（数字、表格、标题）
-│   ├── tushare_collector.py       #   Tushare 数据采集门面
-│   ├── tushare_modules/           #   Tushare 模块化实现
-│   │   ├── constants.py           #     字段映射（VIP/HK/US）
-│   │   ├── infrastructure.py      #     市场检测、格式化
-│   │   ├── financials.py          #     财务报表 get_* 方法
-│   │   ├── other_data.py          #     分部/持股/审计/质押
-│   │   ├── derived_metrics.py     #     §17 衍生指标计算
-│   │   ├── yfinance_integration.py #    yfinance 回退（港/美股）
-│   │   └── assembly.py            #     数据包组装
-│   ├── pdf_preprocessor.py        #   PDF 年报章节提取
-│   ├── split_data_pack.py         #   Agent Team 数据预分发
-│   ├── valuation_engine.py        #   估值引擎（DCF/DDM/PEG/PE Band/PS）
-│   ├── report_to_html.py          #   MD → HTML 转换（支持 --standalone）
-│   ├── screener_config.py         #   选股器配置
-│   ├── screener_core.py           #   选股器核心（两级筛选）
-│   └── download_report.py         #   年报PDF下载
-├── prompts/                       # v1 提示词（只读遗留）
-├── cigarbutt/                     # 烟蒂策略（独立模块）
-├── notebooks/                     # Jupyter Notebooks
-│   └── screener.ipynb             #   选股器交互式 Notebook
-├── tests/                         # 测试套件（792 tests）
-│   ├── conftest.py
-│   ├── fixtures/mock_tushare_responses/
-│   ├── test_config.py
-│   ├── test_coordinator.py
-│   ├── test_derived_metrics.py
-│   ├── test_download_report.py
-│   ├── test_format_utils.py
-│   ├── test_integration.py
-│   ├── test_output_format.py
-│   ├── test_pdf_preprocessor.py
-│   ├── test_phase1b_prompt.py
-│   ├── test_phase2b_prompt.py
-│   ├── test_phase3_prompt.py
-│   ├── test_refresh_market.py
-│   ├── test_screener.py
-│   └── test_tushare_client.py
-├── output/                        # 输出目录（gitignored）
-├── init.sh                        # 环境初始化脚本
-├── requirements.txt               # Python 依赖
-├── CHANGELOG_V2.md                # v1→v2 变更日志
-├── feature_list.json              # 功能清单
-└── claude-progress.txt            # 开发进度日志
+├── AGENTS.md                       # 平台中立入口（DSH：读 coordinator + 跑脚本）
+├── .agents/skills/                 # DSH 技能（DSH 从此路径发现）
+│   ├── tushare/                    #   Tushare 采集用法 / §1–§17 / --rf
+│   ├── business-analysis/          #   切片 → 六维度并行 → 综合
+│   ├── valuation/                  #   估值引擎 + 定性调整
+│   ├── turtle-analysis/            #   龟龟策略全流程
+│   └── download-annual-report/     #   年报 PDF 搜索与下载
+├── .claude/                        # Claude Code 兼容层
+│   ├── commands/                   #   slash commands（与 coordinator.md 同步）
+│   └── skills/                     #   → ../../.agents/skills/* 软链（单一来源）
+├── shared/                         # 共享模块
+│   └── qualitative/                #   通用定性分析模块
+│       ├── coordinator.md          #     v3 入口（切片 + 六维度并行 + 综合）
+│       ├── qualitative_assessment.md  #  v3 6 维度框架（按维度分段消费）
+│       ├── data_collection.md      #     数据采集指令（web_search 兜底）
+│       ├── agents/                 #     cleanroom_audit / numeric_audit / writing_style
+│       ├── references/             #     output_schema · dim_result.schema.json + contract ·
+│       │                           #     writing_style_rules · judgment_examples ·
+│       │                           #     framework_guide / framework_scope ·
+│       │                           #     industry_metrics_lookup · market_rules_hk/us
+│       └── templates/dashboard.html
+├── strategies/                     # 策略专属模块
+│   ├── turtle/                     #   龟龟策略
+│   │   ├── coordinator.md          #     入口
+│   │   ├── phase2_PDF解析.md        #     PDF 附注提取规范
+│   │   ├── phase3_quantitative.md  #     Pre-flight Step 0 + 穿透回报率（11 步）
+│   │   ├── phase3_valuation.md     #     估值 + 报告组装
+│   │   ├── legacy/                 #     v1 归档提示词
+│   │   └── references/             #     shared_tables · factor_interface · judgment_examples_turtle
+│   └── valuation/                  #   独立估值模块
+│       ├── coordinator.md          #     入口
+│       ├── phase2_valuation.md     #     估值方法 + 报告组装
+│       └── references/             #     classification_rules · valuation_methods ·
+│                                   #     valuation_examples · report_template
+├── scripts/                        # Python 脚本（确定性计算，零 LLM 调用）
+│   ├── tushare_collector.py        #   采集门面（--rf / --refresh-market / --dry-run）
+│   ├── tushare_modules/            #   模块化实现（constants / infrastructure / financials /
+│   │                               #   other_data / derived_metrics / yfinance_integration / assembly）
+│   ├── quality_control.py          #   CM§1–§5 确定性预算指标
+│   ├── dimension_slicer.py         #   按维度切片 + 覆盖 manifest（Step 2.0）
+│   ├── validate_dim_result.py      #   L1 契约校验（硬失败 + ≤2 重试）
+│   ├── report_consistency.py       #   跨段一致性 + 硬门槛（Step 3A）
+│   ├── extract_pdf_text.py         #   PDF → 带页标文本（切片/审计用）
+│   ├── pdf_preprocessor.py         #   年报章节定位（7 个目标章节）
+│   ├── valuation_engine.py         #   估值引擎（DCF/DDM/PEG/PE Band/PS）
+│   ├── report_to_html.py           #   MD → HTML（--standalone）
+│   ├── download_report.py          #   年报 PDF 下载
+│   ├── rf_utils.py                 #   §14 无风险利率解析与回读
+│   ├── screener_config.py / screener_core.py    # 选股器（两级筛选）
+│   └── cache_utils.py / config.py / format_utils.py / generate_available_fields.py
+├── prompts/                        # v1 提示词（只读遗留）
+├── ciguttprepare/                  # 烟蒂策略准备（独立模块）
+├── financial-report-minesweeper/   # 财报排雷（独立模块）
+├── experiments/ab_phase2/          # 阶段 2 A/B 方案（已设计，未执行）
+├── notebooks/                      # screener.ipynb（17 cells）· screener_hk.ipynb
+├── tests/                          # 测试套件（29 个文件 / 1094 passed, 3 skipped）
+├── output/                         # 输出目录（gitignored）
+├── init.sh · requirements.txt · skills-lock.json · CHANGELOG_V2.md
 ```
 
 ## 分析框架详解
 
 ### 定性分析（共享模块，6 维度）
 
-v2.0-beta 的定性分析采用 **PDF-first 单 Agent** 架构：年报 PDF 直接载入 1M context 作为主数据源，Tushare 仅作历史序列补充。单 Agent 模式在交叉验证上优于多 Agent 拆分，所有维度共享同一 context 消除信息孤岛。
+v3 的定性分析采用 **切片 + 六维度并行 + 综合** 架构：`dimension_slicer.py` 按目录/章节把年报切成每个维度一份的切片（预算硬上限、排除封面与目录页），6 个维度子代理各自读取**逐字节相同的共享前缀**（数据包 + CM + 写作规范 + schema）与**自己的切片**，产出符合 `dim_result.schema.json` 的契约化 JSON，再由综合代理只读这 6 份 JSON 组装报告并显式裁决跨维度冲突。
+
+> 为什么不再用"单 Agent + 全文载入"：真实年报正文 201K–573K 字符，叠加固定输入后达 245K–617K 字符，**超出上下文窗口**。切片后单次调用峰值实测 **43–45K 字符**（含必须下发的 data pack 与 CM；相对最小样本 ↓81.5%），窗口余量仍有 2.8–4.9×。
 
 | 维度 | 内容 | 说明 |
 |------|------|------|
@@ -358,9 +350,9 @@ v2.0-beta 的定性分析采用 **PDF-first 单 Agent** 架构：年报 PDF 直�
 
 **因子 2：穿透回报率粗算**
 - 从 §17.2 读取 C/B/M/N/OE 等参数 + OE 纠偏
-- 否决门（ROE < 8% 或负值 → 直接否决）
+- 分母用市值，R% 与门槛 II 比较（`max(3.5%, Rf+2%)` A股 / `max(5%, Rf+3%)` 港股）
 - 计算穿透回报率 R% = M × (1 − 分红税率) × OE
-- 否决判定（R% < Rf → 否决）
+- **无否决门**：v2.0 起所有因子只输出客观评估，由 Agent C 统一裁决（v1.1 的 9 个否决门已移除）
 
 **因子 3：穿透回报率精算**
 - 真实现金收入（S/T/U、保守基础、收款比率）
@@ -438,7 +430,7 @@ v2.0-beta 的定性分析采用 **PDF-first 单 Agent** 架构：年报 PDF 直�
 ## 测试
 
 ```bash
-# 运行全部测试（792 tests）
+# 运行全部测试（1094 passed, 3 skipped）
 .venv/bin/python -m pytest tests/ -v
 
 # 运行单个测试文件
@@ -451,7 +443,7 @@ v2.0-beta 的定性分析采用 **PDF-first 单 Agent** 架构：年报 PDF 直�
 .venv/bin/python -m pytest tests/ --cov=scripts --cov-report=term-missing
 ```
 
-测试覆盖范围（14 个测试文件）：
+测试覆盖范围（29 个测试文件，含 L1 契约 / 切片器 / 精度回归 / v3 流水线守卫 / DSH 工具名守卫）：
 - 配置与工具函数（`test_config.py`, `test_format_utils.py`）
 - Tushare 数据采集 + 衍生指标（`test_tushare_client.py`, `test_derived_metrics.py`）
 - PDF 预处理（`test_pdf_preprocessor.py`）
@@ -461,6 +453,7 @@ v2.0-beta 的定性分析采用 **PDF-first 单 Agent** 架构：年报 PDF 直�
 - 年报下载（`test_download_report.py`）
 - 选股器全流程（`test_screener.py`）
 - 增量刷新模式（`test_refresh_market.py`）
+- v3 专项：`test_dim_result_contract.py`（契约）、`test_dimension_slicer.py`（切片）、`test_validate_dim_result.py`（硬校验）、`test_v3_pipeline_prompts.py`（流水线接线）、`test_report_consistency_precision.py`（冲突识别精度）、`test_dsh_tool_names.py`（平台去耦）
 
 所有测试使用 Mock 数据，不需要 Tushare Token 即可运行。
 
@@ -468,7 +461,9 @@ v2.0-beta 的定性分析采用 **PDF-first 单 Agent** 架构：年报 PDF 直�
 
 ### 数据单位约定
 
-所有金额统一为 **百万元（RMB）**。Tushare 返回的原始数据（元）在采集时自动除以 1,000,000，并使用千分位格式化显示。
+数据包与结构化参数表的金额统一为 **百万元（RMB）**：Tushare 返回的原始数据（元）在采集时自动除以 1,000,000，并使用千分位格式化。
+
+**定性报告正文为可读性统一用亿元**（取自 `computed_metrics.md` 的 CM§1 亿元对照表），引用时标 `[src: CM§1]`；两套单位并存但各有唯一来源，LLM 不做换算。
 
 ### 缓存策略
 
@@ -486,27 +481,31 @@ v2.0-beta 的定性分析采用 **PDF-first 单 Agent** 架构：年报 PDF 直�
 
 ### 速率限制
 
-Tushare API 调用自动限速：每次请求间隔 ≥ 0.3 秒，失败自动重试（指数退避）。
+Tushare API 调用默认每次间隔 **0.5 秒**（环境变量 `TUSHARE_RATE_DELAY` 可调，设为 `0` 关闭限速）；失败重试按 `2.0s × 尝试次数` 递增退避。
 
 ## 开发指南
 
 ### 功能开发流程
 
-1. 查看 `feature_list.json` 中下一个待实现的 feature
-2. 按 feature 的 `steps` 数组顺序实现
-3. 同步编写测试（不允许跳过测试）
-4. 完成后在 `feature_list.json` 中标记 `passes: true`
-5. 按规范提交 commit
+1. 先读 [AGENTS.md](AGENTS.md) 与相关 `coordinator.md`，确认改动落在哪一层
+   （**Python 做确定性计算**、**提示词做定性判断**，不要把算术搬回 LLM）
+2. 改 Python 必须同步改测试（不允许跳过测试）；改提示词必须同步对应断言
+   （`test_*_prompt*.py` 以及 `tests/test_v3_pipeline_prompts.py`）
+3. 跨平台措辞只用中立工具名（`web_search` / `subagent` / `bash` / `read` / `edit` …），
+   `tests/test_dsh_tool_names.py` 会拦截 Claude 专有名称
+4. 运行 `.venv/bin/python -m pytest tests/ -q` 必须全绿；改动交付契约时同时更新
+   `shared/qualitative/references/dim_result.schema.json` 与 `dim_result_contract.md`
+5. 在 [CHANGELOG_V2.md](CHANGELOG_V2.md) 记录变更（含实测数据，便于日后复核）
 
 ### 提交规范
 
 ```
-feat(category): description [feature #N]
-fix(category): description [feature #N]
-test(category): description [feature #N]
+feat(scope): description
+fix(scope): description
+test(scope): description
 ```
 
-Category 对应 `feature_list.json` 中的分类：`infrastructure`, `phase1a_tushare`, `phase1b_websearch`, `phase2a_pdf_preprocess`, `phase3_analysis`, `screener` 等。
+Scope 用模块名：`tushare` / `qualitative` / `valuation` / `screener` / `pipeline` / `docs` 等。
 
 ### 里程碑
 
@@ -517,8 +516,9 @@ Category 对应 `feature_list.json` 中的分类：`infrastructure`, `phase1a_tu
 | v1.0 | 完整 pipeline + 提示词 v1 | 已完成 |
 | v1.1 | 17 improvements, HK/US support, shared_tables | 已完成 |
 | v2.0-alpha | 模块化拆分 + Greenwald 护城河 + Agent Team + HTML 仪表盘 | 已完成 |
-| **v2.0-beta** | **PDF-first 单 Agent + 估值模块 + Pre-flight 合并 + 实战验证** | **当前** |
-| v2.0-rc | 烟蒂策略接入 shared 模块 + 端到端调优 | 计划中 |
+| v2.0-beta | PDF-first 单 Agent + 估值模块 + Pre-flight 合并 + 实战验证 | 已完成 |
+| **v3** | **定性分析改切片 + 六维度并行 + 契约化交接（`dim_result.schema.json`）+ 平台去耦（DSH）** | **当前** |
+| v3.1 | 烟蒂策略接入 shared 模块 + 端到端调优 | 计划中 |
 
 ## 依赖
 
@@ -533,6 +533,8 @@ matplotlib>=3.5.0     # 可视化（Notebook）
 tqdm>=4.60.0          # 进度条
 jupyter>=1.0.0        # Notebook 运行环境
 jinja2>=3.0.0         # HTML 模板（报告 + 选股器导出）
+jsonschema>=4.0.0     # L1 维度结果契约校验（validate_dim_result.py）
+markdown>=3.4.0       # MD → HTML 转换（report_to_html.py）
 yfinance>=0.2.0       # 港股/美股行情回退
 ```
 

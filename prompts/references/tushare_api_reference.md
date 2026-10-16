@@ -1131,12 +1131,20 @@ df = pro.hk_tradecal(start_date='20200101', end_date='20200708')
 
 ### ind_name 常见取值
 
+> ⚠️ **清单不完整**：实测单个标的 `hk_income` 有 **29 个** `ind_name`
+> （本文档列了 16 个），且**词汇因发行人而异**（有的只有 `营运支出`，有的拆成
+> `销售及分销费用` + `行政开支`）。以 `ind_name` 全集为准，勿依赖本表。
+
 | ind_name | 含义 |
 |----------|------|
 | 营业额 | Revenue |
-| 营运支出 | Operating expenses |
+| 营运支出 | Operating expenses（**按性质列报时含员工成本，不单列**） |
 | 销售及分销费用 | Selling and distribution expenses |
 | 行政开支 | Administrative expenses |
+| **薪金福利支出** | Staff costs（**因子3 的 W2 首选来源**；实测覆盖约 3/12 标的，如 06862 / 00696 / 00728） |
+| **折旧与摊销** | Depreciation and amortization（利润表口径，与现金流量表的 `加:折旧及摊销` 略有差异） |
+| 毛利 | Gross profit |
+| 其他收入 / 其他收益 / 其他支出 | Other income / gains / expenses |
 | 经营溢利 | Operating profit |
 | 利息收入 | Interest income |
 | 融资成本 | Finance costs |
@@ -1148,6 +1156,11 @@ df = pro.hk_tradecal(start_date='20200101', end_date='20200708')
 | 股东应占溢利 | Profit attributable to shareholders |
 | 每股基本盈利 | Basic EPS |
 | 每股摊薄盈利 | Diluted EPS |
+
+> ⚠️ **港股按性质列报时员工成本在 `薪金福利支出`，不在 `营运支出` 里单列。**
+> 现金流量表没有 `c_pay_to_staff`（该字段为 A 股专属），因此因子3 的 W2 必须
+> 优先从利润表取 `薪金福利支出`，否则会降级到 SGA 兜底并严重低估
+> （实测 06862：兜底 1,475.5 vs 真实 14,073.0 百万）。参见 `known_issues.md` P1-6。
 
 ### 接口用法
 
@@ -1165,7 +1178,7 @@ df = pro.hk_income(ts_code='00700.HK', ind_name='营业额')
 
 `tushare_collector.py` 中 `HK_INCOME_MAP` 定义了 ind_name 到内部字段名的映射关系。
 
-**注意**: 与 A 股不同，HK 利润表将指标名放在 `ind_name` 列中，需 pivot 后使用。值的单位为 HKD 元，使用时需除以 1e6 转为百万。
+**注意**: 与 A 股不同，HK 利润表将指标名放在 `ind_name` 列中，需 pivot 后使用。值的单位为**发行人报告币种**（多数为人民币，见文末「HK vs A-Share API 数据格式对比」的警告），使用时需除以 1e6 转为百万。
 
 ---
 
@@ -1199,16 +1212,22 @@ df = pro.hk_income(ts_code='00700.HK', ind_name='营业额')
 
 ### ind_name 常见取值
 
+> ⚠️ **清单不完整**：实测单个标的 `hk_balancesheet` 有 **62 个** `ind_name`
+> （本文档列了 18 个）。以下补入了因子3 假资产剔除与防御性门槛所需的关键项。
+
 **资产类**:
 
 | ind_name | 含义 |
 |----------|------|
 | 现金及等价物 | Cash and equivalents |
+| 短期存款 / 中长期存款 | Short-term / long-term deposits |
+| 受限制存款及现金 | Restricted cash（因子3 的可自由支配现金需扣除） |
 | 应收帐款 | Accounts receivable |
 | 存货 | Inventories |
 | 流动资产合计 | Total current assets |
 | 物业厂房及设备 | Property, plant and equipment |
 | 无形资产 | Intangible assets |
+| **商誉** | Goodwill（因子3「商誉、无形资产都是假资产」需剔除） |
 | 在建工程 | Construction in progress |
 | 联营公司权益 | Interest in associates |
 | 递延税项资产 | Deferred tax assets |
@@ -1220,10 +1239,11 @@ df = pro.hk_income(ts_code='00700.HK', ind_name='营业额')
 |----------|------|
 | 应付帐款 | Accounts payable |
 | 应付票据 | Notes payable |
-| 短期贷款 | Short-term borrowings |
+| 短期贷款 | Short-term borrowings（防御性门槛①：现金 > 短期借款） |
 | 递延收入(流动) | Deferred income (current) |
-| 流动负债合计 | Total current liabilities |
+| 流动负债合计 | Total current liabilities（防御性门槛②：现金 > 流动负债） |
 | 长期贷款 | Long-term borrowings |
+| 融资租赁负债(流动) / (非流动) | Lease liabilities（因子3 租赁扣除项） |
 | 递延税项负债 | Deferred tax liabilities |
 | 应付票据(非流动) | Notes payable (non-current) |
 | 总负债 | Total liabilities |
@@ -1280,21 +1300,35 @@ df = pro.hk_balancesheet(ts_code='00700.HK', period='20241231')
 
 ### ind_name 常见取值
 
+> ⚠️ **本清单是不完整示例，不是全集。** 实测单个港股标的的 `ind_name` 有 **47–60 个**
+> （本文档只列了 8 个）。历史问题正是照着这份清单写映射表，漏掉了
+> `购建固定资产`、`加:折旧及摊销`、`收购附属公司` 等关键项目
+> （`known_issues.md` P1-5）。**新增字段映射前，先拉一次真实数据核对 `ind_name` 全集。**
+
 **经营活动**:
 
 | ind_name | 含义 |
 |----------|------|
 | 经营业务现金净额 | Net cash from operating activities |
 | 已付税项 | Tax paid |
-| 折旧及摊销 | Depreciation and amortization |
+| **加:折旧及摊销** | Depreciation and amortization（间接法调整项，**必须带「加:」前缀**；无前缀的 `折旧及摊销` 实测不存在） |
+| 收购附属公司 | Acquisition of subsidiaries（因子3 的 X1 扣除项） |
+| 偿还融资租赁 | Repayment of finance leases（因子3 的租赁扣除项） |
+| 购买子公司少数股权而支付的现金 | Purchase of minority interests |
 
 **投资活动**:
 
 | ind_name | 含义 |
 |----------|------|
-| 购建无形资产及其他资产 | Purchase of intangible/other assets (CapEx) |
+| **购建固定资产** | Purchase of PP&E（**CapEx 主体**） |
+| **购建无形资产及其他资产** | Purchase of intangible/other assets |
 | 收回投资所得现金 | Cash received from disposal of investments |
 | 投资业务现金净额 | Net cash from investing activities |
+
+> ⚠️ **CapEx 必须取两项之和**：`购建固定资产` + `购建无形资产及其他资产`。
+> 只取后者会低估 1.5–130 倍（实测 06862 / 00506 / 06049）；
+> 保利物业（06049）**只有前者**，只取后者会得到 CapEx = 0。
+> 参见 `known_issues.md` P1-5。
 
 **融资活动**:
 
@@ -1378,10 +1412,21 @@ df = pro.hk_cashflow(ts_code='00700.HK', period='20241231')
 |------|------|------|
 | pe_ttm | float | 滚动市盈率 |
 | pb_ttm | float | 滚动市净率 |
-| total_market_cap | float | 总市值 |
-| hksk_market_cap | float | 港股通市值 |
+| total_market_cap | float | 总市值（**原始港元，非百万**；见下方说明） |
+| hksk_market_cap | float | 港股通市值（同上，原始港元） |
 | divi_ratio | float | 分红率 (%) |
 | dividend_rate | float | 股息率 (%) |
+
+> ⚠️ **`total_market_cap` 单位是原始港元（元），不是百万。** 该字段原先未标单位，
+> 代码曾在 4 处当成"百万"使用，导致市值偏大 1e6 倍（`known_issues.md` P0-3）。
+>
+> 实测（2026-10）10/10 标的均为原始元：
+> `00700.HK = 3,862,538,856,756`（HK$3.86 万亿）、`06862.HK = 53,343,180,000`（HK$533 亿）。
+>
+> **单位自检**：与 `close × 总股本` 交叉验证；再与 `pb_ttm` 交叉验证 ——
+> Tushare 自己的比率内部已做 HKD→RMB 换算，故
+> `total_market_cap × (1 HKD→CNY) ÷ 股东权益 ≈ pb_ttm` 应当成立
+> （实测 5/5 标的比值都落在 0.865 上）。
 
 ### 接口用法
 
@@ -1426,7 +1471,15 @@ ts_code,end_date,dps_hkd,divi_ratio
 | 数据格式 | **结构化字段** — 每个指标一列 | **行转列 (pivoted)** — `ind_name` + `ind_value` |
 | 指标名称 | 英文字段名 (e.g. `n_income_attr_p`) | 中文字符串 (e.g. `股东应占溢利`) |
 | 报告类型 | `report_type` 区分合并/母公司报表 | 默认合并报表，无母公司报表 |
-| 金额单位 | 人民币 (元) | 港币 HKD (元) |
+| 金额单位 | 人民币 (元) | **发行人报告币种 (元)** — 见下方警告 |
+
+> ⚠️ **港股报表金额单位不是港币，而是发行人的报告币种。** 绝大多数 A+H / 红筹
+> 公司（海底捞、中国食品、中海物业、保利物业、中国航信…）的财务报表以
+> **人民币**列示，年报里明确写着 `The presentation currency … was Renminbi`
+> 或表头 `(RMB'000)`。**不得按 `.HK` 后缀推断为港币**：
+> 与真实港元市值相除会引入约 14–16% 的系统性偏差
+> （2026-08-21 中间价 `100港元 = 86.466 人民币`，即 1 HKD = 0.86466 CNY）。
+> 参见 `known_issues.md` P0-2。
 
 | 维度 | A股 (fina_indicator) | 港股 (hk_fina_indicator) |
 |------|---------------------|--------------------------|

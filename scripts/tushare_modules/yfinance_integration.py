@@ -12,8 +12,29 @@ from tushare_modules.constants import _YF_INCOME_MAP, _YF_BALANCE_MAP, _YF_CASHF
 
 
 def _yf():
-    """Access yfinance module via tushare_collector for @patch compatibility."""
-    return sys.modules["tushare_collector"].yf
+    """Access the yfinance module.
+
+    Historically this was ``sys.modules["tushare_collector"].yf`` so that
+    ``@patch("tushare_collector.yf")`` works in tests. That broke in production:
+    running ``python scripts/tushare_collector.py`` registers the module under
+    ``__main__``, so the lookup raised ``KeyError: 'tushare_collector'`` and the
+    **whole yfinance fallback silently failed**. Observed live 2026-10-13 for
+    06862.HK income/balance/cashflow; tests never caught it because they
+    ``import tushare_collector`` first, which creates the very key that is
+    missing in the CLI path.
+
+    Resolution order:
+      1. ``tushare_collector.yf`` — keeps ``@patch`` working
+      2. ``__main__.yf``          — the real CLI entry point
+      3. a direct ``import yfinance`` — library use with no collector module
+    """
+    for name in ("tushare_collector", "__main__"):
+        module = sys.modules.get(name)
+        candidate = getattr(module, "yf", None) if module is not None else None
+        if candidate is not None:
+            return candidate
+    import yfinance as yf  # last resort: no collector module in play
+    return yf
 
 
 class YFinanceMixin:
@@ -36,19 +57,21 @@ class YFinanceMixin:
         return ts_code
 
     def _yf_fallback_price(self, ts_code: str) -> dict | None:
-        """Fetch basic price/market cap via yfinance as fallback."""
-        if not self._yf_available:
+        """Fetch a fallback price via yfinance **chart API** (never `.info`).
+
+        `Ticker.info` / `.fast_info` are backed by Yahoo's `quoteSummary`, which since
+        2026-10 requires a crumb and answers **HTTP 401**; yfinance then retries until it
+        times out (~30 s) and the old code swallowed that into `None`, so the fallback had
+        silently stopped working. The chart endpoint needs no crumb (verified: 06862.HK
+        returns close 9.30 and 421 weekly points).
+        """
+        df = self._yahoo_chart_df(ts_code, "5d", "1d")
+        if df is None or df.empty:
             return None
-        try:
-            ticker = _yf().Ticker(self._yf_ticker(ts_code))
-            info = ticker.info
-            return {
-                "close": info.get("regularMarketPrice") or info.get("previousClose"),
-                "market_cap": info.get("marketCap"),
-                "source": "yfinance (降级)",
-            }
-        except Exception:
+        closes = df["close"].dropna()
+        if closes.empty:
             return None
+        return {"close": float(closes.iloc[-1]), "source": "yahoo chart (降级)"}
 
     @staticmethod
     def _is_hk(ts_code: str) -> bool:
@@ -89,55 +112,104 @@ class YFinanceMixin:
         """Strip .US suffix for Tushare US API calls (Tushare uses plain tickers)."""
         return ts_code.rsplit(".", 1)[0]
 
-    @staticmethod
-    def _pivot_hk_line_items(df: pd.DataFrame, field_map: dict) -> pd.DataFrame:
-        """Pivot HK ind_name/ind_value rows into one-row-per-period columns.
+    # NOTE: `_pivot_hk_line_items` intentionally lives ONLY in InfrastructureMixin.
+    # A byte-identical copy used to exist here, but InfrastructureMixin precedes
+    # YFinanceMixin in TushareClient's MRO, so this copy was dead code — editing
+    # it silently had no effect. Removed 2026-10-13 to eliminate that trap.
 
-        HK financial APIs return data in line-item format:
-            end_date | ind_name   | ind_value
-            20241231 | 营业额     | 60000
-            20241231 | 除税后溢利 | 10000
-        This pivots them into columnar format matching A-share structure.
+    _YAHOO_CHART_URL = ("https://query1.finance.yahoo.com/v8/finance/chart/"
+                        "{sym}?range={rng}&interval={itv}")
+
+    def _yahoo_chart_df(self, ts_code: str, rng: str, itv: str) -> pd.DataFrame:
+        """OHLCV straight from Yahoo's **chart** endpoint (no yfinance session, no crumb).
+
+        2026-10 实测：yfinance 1.2.1 的会话对港股被限流（`YFRateLimitError` 429），而同一
+        chart 端点在普通带 UA 的请求下正常返回（6862.HK → 10 年周线 421 点、末收盘 9.30、
+        最低 9.08）。因此港股行情改为直接请求该端点：既不需要 crumb，也不受 yfinance
+        会话限流影响。失败一律返回空 DataFrame，让调用方**可见地**退化。
         """
-        if df.empty or "ind_name" not in df.columns:
+        import requests
+        sym = self._yf_ticker(ts_code)
+        try:
+            resp = requests.get(self._YAHOO_CHART_URL.format(sym=sym, rng=rng, itv=itv),
+                                timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+            results = (resp.json().get("chart") or {}).get("result") or []
+            if not results:
+                return pd.DataFrame()
+            res = results[0]
+            quote = (res.get("indicators", {}).get("quote") or [{}])[0]
+            stamps = res.get("timestamp") or []
+            if not stamps:
+                return pd.DataFrame()
+            df = pd.DataFrame({
+                "trade_date": pd.to_datetime(stamps, unit="s"),
+                "open": quote.get("open"), "high": quote.get("high"),
+                "low": quote.get("low"), "close": quote.get("close"),
+                "vol": quote.get("volume"),
+            })
+            df = df.dropna(subset=["close"]).reset_index(drop=True)
+            if df.empty:
+                return df
+            df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y%m%d")
+            df["ts_code"] = ts_code
+            return df[["ts_code", "trade_date", "open", "high", "low", "close", "vol"]]
+        except Exception:
             return pd.DataFrame()
-
-        reverse_map = {v: k for k, v in field_map.items() if v is not None}
-        df_mapped = df[df["ind_name"].isin(reverse_map)].copy()
-        if df_mapped.empty:
-            return pd.DataFrame()
-
-        df_mapped["field"] = df_mapped["ind_name"].map(reverse_map)
-
-        # Convert ind_value to numeric
-        df_mapped["ind_value"] = pd.to_numeric(df_mapped["ind_value"], errors="coerce")
-
-        pivoted = df_mapped.pivot_table(
-            index=["end_date", "ts_code"], columns="field",
-            values="ind_value", aggfunc="first"
-        ).reset_index()
-        pivoted.columns.name = None
-        return pivoted
 
     def _yf_hk_market_data(self, ts_code: str) -> dict | None:
-        """Fetch HK stock market data via yfinance (52-week, price, volume)."""
-        if not self._yf_available:
+        """HK market data via the yfinance **chart API** (price / 52w / volume).
+
+        Why not `.info`: `quoteSummary` now requires a crumb and returns HTTP 401, so the
+        previous all-`info` implementation always failed, was swallowed into `None`, and the
+        whole HK market-data path degraded to the quota-limited `hk_daily` (5/day) — which is
+        the real content of `known_issues.md` #24 "港股行情无冗余源". The chart endpoint
+        (`Ticker.history`) needs no crumb.
+
+        Market cap is **not** taken from yfinance: it is already available from Tushare
+        (`hk_fina_indicator.total_market_cap`, normalised by `_hk_market_cap_raw`) and is
+        reused here when present, so §2 keeps showing 总市值 without the crumb-backed call.
+        """
+        daily = self._yahoo_chart_df(ts_code, "1y", "1d")
+        if daily.empty and self._yf_available:
+            try:                      # 二级回退：yfinance 会话（可能被限流）
+                hist = _yf().Ticker(self._yf_ticker(ts_code)).history(period="1y", interval="1d")
+                if hist is not None and not hist.empty and "Close" in hist:
+                    daily = hist.reset_index().rename(columns={
+                        "Date": "trade_date", "High": "high", "Low": "low",
+                        "Close": "close", "Volume": "vol"})
+            except Exception:
+                daily = pd.DataFrame()
+        if daily is None or daily.empty:
             return None
         try:
-            ticker = _yf().Ticker(self._yf_ticker(ts_code))
-            info = ticker.info
-            return {
-                "close": info.get("regularMarketPrice") or info.get("previousClose"),
-                "high_52w": info.get("fiftyTwoWeekHigh"),
-                "low_52w": info.get("fiftyTwoWeekLow"),
-                "market_cap": info.get("marketCap"),
-                "volume_avg": info.get("averageDailyVolume10Day"),
-            }
+            closes = daily["close"].dropna()
+            if closes.empty:
+                return None
+            out = {"close": float(closes.iloc[-1])}
+            high = daily["high"].dropna() if "high" in daily else pd.Series(dtype=float)
+            low = daily["low"].dropna() if "low" in daily else pd.Series(dtype=float)
+            vol = daily["vol"].dropna() if "vol" in daily else pd.Series(dtype=float)
+            if not high.empty:
+                out["high_52w"] = float(high.max())
+            if not low.empty:
+                out["low_52w"] = float(low.min())
+            if not vol.empty:
+                out["volume_avg"] = float(vol.tail(10).mean())
+            basic = self._store.get("basic_info")
+            if basic is not None and not getattr(basic, "empty", True):
+                cap = self._hk_market_cap_raw(basic.iloc[0])
+                if cap:
+                    out["market_cap"] = cap
+            return out
         except Exception:
             return None
 
     def _yf_weekly_history(self, ts_code: str) -> pd.DataFrame:
-        """Fetch 10-year weekly price history via yfinance."""
+        """10-year weekly history — Yahoo chart endpoint first, yfinance as fallback."""
+        direct = self._yahoo_chart_df(ts_code, "10y", "1wk")
+        if not direct.empty:
+            return direct
         if not self._yf_available:
             return pd.DataFrame()
         try:
@@ -173,6 +245,18 @@ class YFinanceMixin:
             (filled_df, yf_used_flag) tuple.
         """
         if not self._yf_available:
+            return pivoted, False
+
+        # ---- 币种守卫（known_issues #23）----
+        # Yahoo 基本面报表的**计价币种**无法在本仓库内核实（quoteSummary 需 crumb，实测 401／无数据）。
+        # 港股发行人报表币种常与交易币种不同（06862：报表 CNY／交易 HKD），而 Tushare 框架里装的是
+        # **报表币种**数字；填进去就是**静默混币种**（P0-2 那一类）。故 fail-closed：不填、不发请求。
+        reporting = self._reporting_currency(ts_code)
+        trading = self._detect_trading_currency(ts_code)
+        if reporting and trading and reporting != trading:
+            print(f"[yfinance] {ts_code} {statement_type}: 跳过 NaN 填补——报表币种 {reporting} "
+                  f"≠ 交易币种 {trading}，Yahoo 基本面报表的计价币种无法核实"
+                  f"（疑混币种，known_issues #23）", file=sys.stderr)
             return pivoted, False
 
         # Select mapping dict FIRST (before NaN check)

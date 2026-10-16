@@ -11,10 +11,10 @@ Tushare us_* 接口约 **60%** 覆盖率：
 | 数据项 | 状态 | 降级方案 |
 |-------|------|---------|
 | §3P/§4P 母公司报表 | ❌ 不适用 | US GAAP 不区分母公司/合并 |
-| §6 股息历史 | ⚠️ us_dividend 有限 | WebSearch 补充完整股息记录 |
-| §9 主营业务构成 | ❌ Tushare 无 us 版 | WebSearch 获取 10-K segment 数据 |
+| §6 股息历史 | ⚠️ us_dividend 有限 | `web_search` 补充完整股息记录 |
+| §9 主营业务构成 | ❌ Tushare 无 us 版 | `web_search` 获取 10-K segment 数据 |
 | §12 部分财务指标 | ⚠️ q_opincome 等缺失 | 从 §3/§5 手动计算 |
-| §15 股票回购 | ❌ Tushare 无 us 版 | WebSearch 获取回购计划和执行情况 |
+| §15 股票回购 | ❌ Tushare 无 us 版 | `web_search` 获取回购计划和执行情况 |
 | §16 股权质押 | ❌ 不适用 | — |
 | §17 部分衍生指标 | ⚠️ 因 §12 缺失而无法计算 | Phase 3 手动计算或降级 |
 
@@ -24,7 +24,7 @@ Tushare us_* 接口约 **60%** 覆盖率：
 
 ## 数据采集补充（Phase 1B）
 
-以下章节需 Agent 通过 WebSearch 补充：
+以下章节需 Agent 通过 `web_search` 补充：
 - §8 行业与竞争
 - §9 业务构成（10-K segment disclosure）
 - §10 MD&A（Management Discussion & Analysis）

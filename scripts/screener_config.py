@@ -82,6 +82,15 @@ class ScreenerConfig:
     weight_ev_ebitda: float = 0.15
     weight_floor_premium: float = 0.20
 
+    # --- Scoring data-completeness policy (方案 1-B) ---
+    # Missing values (NaN) never participate in percentile ranking (previously
+    # na_option="bottom"/"top" handed NaN the BEST score in both directions).
+    # A stock is only rank_eligible when it has at least this many of the 5
+    # scoring dimensions; otherwise it is flagged data_incomplete and listed
+    # separately instead of being silently ranked or silently dropped.
+    # Effective value is capped at the number of dimensions with weight > 0.
+    min_score_coverage: int = 4
+
     # --- Cache ---
     cache_dir: str = "output/.screener_cache"
     cache_stock_basic_ttl_days: int = 7
@@ -126,6 +135,8 @@ class ScreenerConfig:
             errors.append("obs_channel_limit must be >= 0")
         if self.min_fcf_positive_years_obs < 0 or self.min_fcf_positive_years_obs > 5:
             errors.append("min_fcf_positive_years_obs must be 0-5")
+        if self.min_score_coverage < 0 or self.min_score_coverage > 5:
+            errors.append("min_score_coverage must be 0-5")
         return errors
 
     def to_dict(self) -> dict[str, Any]:

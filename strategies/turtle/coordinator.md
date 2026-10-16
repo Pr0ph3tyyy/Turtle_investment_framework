@@ -1,6 +1,6 @@
 # 龟龟投资策略 v2.0 — 协调器（Coordinator）
 
-> **角色**：你是项目经理。职责：(1) 验证输入并通过 AskUserQuestion 补全缺失信息；(2) 检查前置条件（定性分析报告）；(3) 按依赖关系调度 Phase 0→1→2→3；(4) 监控 checkpoint 和超时；(5) 交付最终报告。你不执行数据采集或分析计算。
+> **角色**：你是项目经理。职责：(1) 验证输入并通过 `ask_user_question` 补全缺失信息；(2) 检查前置条件（定性分析报告）；(3) 按依赖关系调度 Phase 0→1→2→3；(4) 监控 checkpoint 和超时；(5) 交付最终报告。你不执行数据采集或分析计算。
 >
 > Phase 3 使用串行 Agent 架构（preflight → Agent B定量 → Agent C估值+报告）。定性分析由 /business-analysis 模块前置完成。
 
@@ -13,7 +13,7 @@
 | 输入项 | 示例 | 必需？ |
 |--------|------|--------|
 | 股票代码或名称 | `600887` / `伊利股份` / `0001.HK` / `AAPL` | 必需 |
-| 持股渠道 | `港股通` / `直接` / `美股券商` | 可选（未指定则触发 AskUserQuestion） |
+| 持股渠道 | `港股通` / `直接` / `美股券商` | 可选（未指定则触发 `ask_user_question`） |
 | PDF 年报文件 | 用户上传的 `.pdf` 文件 | 可选（未提供则触发 Phase 0） |
 
 **解析规则**：
@@ -24,9 +24,9 @@
 
 ---
 
-## AskUserQuestion 交互
+## `ask_user_question` 交互
 
-输入不完整时，**立即使用 AskUserQuestion**，不猜测。
+输入不完整时，**立即使用 `ask_user_question`**，不猜测。
 
 | # | 触发条件 | 问题 | 选项 |
 |---|---------|------|------|
@@ -35,6 +35,7 @@
 | 3 | 无PDF + 无本地缓存 | "是否有最新年报PDF？" | 自动下载(推荐) / 跳过(~85%精度) / 稍后上传 |
 | 4 | 模糊公司名 | "确认您要分析的公司" | {公司1}({代码1}) / {公司2}({代码2}) |
 | 5 | TUSHARE_TOKEN 未设置 | "请提供 Tushare Token" | 我有Token / 没有(降级yfinance) |
+| 6 | 前置文件缺失（qualitative_report.md 或 data_pack_market.md） | "是否先运行 /business-analysis？" | 先运行(推荐) / 停止 |
 
 **不触发**：完整股票代码 → 直接执行；A股默认"长期持有"；美股默认"W-8BEN"；用户已指定渠道 → 直接使用；`TUSHARE_TOKEN` 已设置 → 直接使用
 
@@ -51,15 +52,13 @@
 **必须存在**：
 1. `{output_dir}/qualitative_report.md` — 定性分析报告
    - 确认末尾包含 "结构化参数" 表（含 `moat_rating`、`capital_intensity` 等参数）
-   - 若不存在 → **停止执行**，输出提示：
-   ```
-   ⚠️ 前置条件不满足：未找到 qualitative_report.md
-   请先运行 /business-analysis {stock_code} 生成定性分析报告。
-   ```
 
 2. `{output_dir}/data_pack_market.md` — Tushare 数据包
-   - 若不存在 → **停止执行**，同上提示
    - 若存在 → 检查时效性，通过 `--refresh-market` 刷新市场数据（§1/§2/§11/§14）
+
+**任一缺失 → 使用 `ask_user_question` 询问**（不直接停止）：
+- 先运行 /business-analysis（推荐）→ 通过 `skill` 工具调用 `business-analysis` skill（参数 {stock_code}），等待其完成 → 重新检查前置条件 → 继续管线
+- 停止
 
 **可选**：
 3. `{output_dir}/data_pack_report.md` — PDF 附注数据（由 /business-analysis Step 1C 生成）
@@ -77,7 +76,7 @@
 ┌─────────────────────────────────────────────────┐
 │              用户输入解析                          │
 │   股票代码 = {code}                               │
-│   持股渠道 = {channel | AskUserQuestion}          │
+│   持股渠道 = {channel | ask_user_question}        │
 │   Tushare Token = {有 | 无 → yfinance fallback}  │
 └──────────┬──────────────────────────────────────┘
            │
@@ -87,7 +86,7 @@
 │  qualitative_report.md 存在？ → 必须               │
 │  data_pack_market.md 存在？ → 必须                 │
 │  data_pack_report.md 存在？ → 可选（降级方案）      │
-│    不满足 → 提示运行 /business-analysis，停止       │
+│  不满足 → ask_user_question 询问后决定            │
 └──────────┬──────────────────────────────────────┘
            │
            ▼
@@ -137,7 +136,7 @@ bash init.sh   # 创建 .venv 并安装依赖（pandas / tushare / pdfplumber �
 # data_pack_market.md 已由 /business-analysis 生成，仅刷新 §1/§2/§11/§14
 # 超过 7 天自动降级为全量采集
 
-Bash(
+bash(
   command = "python3 scripts/tushare_collector.py --code {ts_code} --output {output_dir}/data_pack_market.md --refresh-market",
   description = "StepA 市场数据刷新"
 )
@@ -162,11 +161,10 @@ Bash(
 # Pre-flight 已合并到 phase3_quantitative.md 的 Step 0
 # Agent B 先做数据校验与口径锚定，然后直接执行 11 步穿透回报率计算
 # 若 Step 0 裁决为 SUPPLEMENT_NEEDED → Agent B 输出补救请求后停止
-#   协调器解析 SUPPLEMENT_REQUEST，启动 WebSearch 补充后重新运行 Agent B（最多1次）
+#   协调器解析 SUPPLEMENT_REQUEST，启动 `web_search` 补充后重新运行 Agent B（最多1次）
 # 若 Step 0 裁决为 ABORT → Agent B 输出原因后停止，协调器通知用户
 
-Task(
-  subagent_type = "general-purpose",
+subagent(
   prompt = """
   请阅读 {strategy_dir}/phase3_quantitative.md 中的完整指令（含 Step 0 数据校验）。
   同时加载 {strategy_dir}/references/judgment_examples_turtle.md 作为龟龟专属判断锚点参考。
@@ -185,12 +183,45 @@ Task(
 # 等待 Agent B 完成
 # 检查 Agent B 输出中的 Step 0 裁决：
 #   PROCEED → 正常完成，继续 Agent C
-#   SUPPLEMENT_NEEDED → 解析补救请求，WebSearch 补充后重跑（最多1次）
+#   SUPPLEMENT_NEEDED → 解析补救请求，`web_search` 补充后重跑（最多1次）
 #   ABORT → 通知用户，停止
 
+# === Step 3.1.5: 数值审核（**必做**，Agent C 之前）===
+# 为什么必须卡在这里：Agent B 一跑完，报告里的每个决策数字就已经确定了；
+# 等到报告写完再发现 §17 算错，返工的是整条链。而既有门禁（invariants 只查包内自洽、
+# field_coverage 只查是否少一行）都看不见"自洽但错"—— 实测 §17.9 的币种错与
+# 门槛 II 的废止公式就是这样逃过去的。
+.venv/bin/python scripts/numeric_audit.py \
+  --pack {output_dir}/data_pack_market.md --output-dir {output_dir}
+echo "数值审核预检 exit=$?"
+
+subagent(
+  prompt = """
+  请阅读 {shared_dir}/audit/numeric_audit_agent.md 中的完整指令并严格执行。
+
+  输入：
+    - {output_dir}/numeric_audit.md          （确定性预检工作单）
+    - {output_dir}/numeric_audit.json        （结构化 findings）
+    - {output_dir}/data_pack_market.md       （被审对象）
+    - {output_dir}/invariants.json / field_coverage.json（相邻门禁结论）
+    - {output_dir}/data_pack_report.md       （若存在：年报附注，用于脚本做不到的提取核查）
+    - {output_dir}/*.pdf                     （若存在：年报原文）
+
+  禁止读取：phase3_quantitative.md 的结论段、{company}_{code}_分析报告.md、audit.md、
+  cleanroom_metrics.md —— 审计不得被下游结论锚定。
+
+  将逐条裁定写入：{output_dir}/numeric_audit_verdict.md（末行 NUMERIC_AUDIT_RESULT）
+  """,
+  description = "Step3.1.5 数值审核（提取一致性 + 计算正确性）"
+)
+
+# 解析 numeric_audit_verdict.md 末行：
+#   NUMERIC_AUDIT_RESULT: PASS          → 继续 Agent C
+#   NUMERIC_AUDIT_RESULT: FIX_REQUIRED  → 按"原文 → 修正"清单修复数据包并**重跑数值审核**（最多 2 轮）；
+#                                        仍不通过 → 通知用户，停止（不得带着未裁定的差异进 Agent C）
+
 # === Step 3.2: Agent C（估值 + 报告组装）===
-Task(
-  subagent_type = "general-purpose",
+subagent(
   prompt = """
   请阅读 {strategy_dir}/phase3_valuation.md 中的完整指令。
 
@@ -215,6 +246,71 @@ Task(
 # Phase 3 的 Agent B 自动处理缺失的 data_pack_report.md
 # Agent B 使用降级方案：P2/P3/P4/P6/P13 附注数据不可用
 ```
+
+---
+
+## Step 3.3：交付门禁（**硬性前置，不可跳过**）
+
+> 2026-10-14 新增。此前本协调器**一次都没有提到任何门禁**，于是 `invariants` FAIL 3 +
+> `field_coverage` FAIL 1 的产物照样交付；`claim` 绑定覆盖率 1.9% 的报告也照样签发。
+> 三条命令全部为交付前置，**任一条非零 ⇒ 不得交付给用户**。
+
+```bash
+# ① 声明绑定（PCN 式 fail-closed）：报告里每个 §17 数字必须机械对上 claims.json。
+#    --strict 启用默认覆盖率下限 20%，并把 UNEVALUATED 计为失败。
+.venv/bin/python scripts/report_consistency.py \
+  --report "output/{code}_{company}/{company}_{code}_分析报告.md" \
+  --claims output/{code}_{company}/claims.json --gates --strict
+echo "① exit=$?"
+
+# ② 报告级不变式：I8 叙述保真 + I9 规则序（综合底价 ≤ 采纳档目标买入价）。
+#    给了 --claims 时 I9 的两个操作数**取自账本**（cm17.8.floor / cm17.14.k<KKK>.tbp），
+#    不再从正文正则抓 —— 正文可被两处同时改写而仍然"自洽"（实测可洗白）。
+.venv/bin/python scripts/check_report_fidelity.py \
+  --report "output/{code}_{company}/{company}_{code}_分析报告.md" \
+  --dims output/{code}_{company}/dims \
+  --claims output/{code}_{company}/claims.json --strict
+echo "② exit=$?"
+
+# ③ 上游冻结：数据包与 sidecar 与采集时刻一致（防"运行期改上游"）
+.venv/bin/python scripts/stage_manifest.py --check output/{code}_{company}/pack_manifest.json
+echo "③ exit=$?"
+
+# ④ 观点审核（报告生成**之后**）：结论是否自洽、引用是否合规、上游限制是否带进结论
+.venv/bin/python scripts/viewpoint_audit.py \
+  --report "output/{code}_{company}/{company}_{code}_分析报告.md" \
+  --output-dir output/{code}_{company} --strict
+echo "④ exit=$?"
+
+subagent(
+  prompt = """
+  请阅读 {shared_dir}/audit/viewpoint_audit_agent.md 中的完整指令并严格执行。
+  输入：{output_dir}/viewpoint_audit.md / viewpoint_audit.json / 最终报告 /
+        phase3_quantitative.md / qualitative_report.md / claims.json /
+        invariants.json / gate_status.json / numeric_audit_verdict.md
+  禁止读取：audit.md、output/_baselines/**（非预期版本）。
+  将裁定写入：{output_dir}/viewpoint_audit_verdict.md（末行 VIEWPOINT_AUDIT_RESULT）
+  """,
+  description = "Step3.3④ 观点审核（合理性与一致性）"
+)
+# VIEWPOINT_AUDIT_RESULT: FIX_REQUIRED → 按"原文 → 修正"清单修报告并重跑本步（最多 2 轮）
+```
+
+**裁决与处置**：
+
+| 情形 | 处置 |
+|---|---|
+| 三条全 0 | 正常交付 |
+| ① 非零（绑定失败 / 覆盖率不足） | 把报告里未绑定的 §17 数字改为 `<claim id="…">值</claim>`；**不得**用"解释掉"的方式绕过 |
+| ② I8 FAIL | 六维叙述必须与 `dims/D*.json` 逐字一致，或显式声明改写范围（`--strict` 下"节内混入未溯源量"也判 FAIL） |
+| ② I9 FAIL | `综合底价 > 采纳档目标买入价` ⇒ 框架会在自己判定"不可买"的区间发出"低于底价"信号；必须修正基准价构成或采纳档，**不得**用文字解释 |
+| ③ 非零 | 数据包/sidecar 在流程中被改动过 ⇒ 停手、重采集、重跑下游（`known_issues.md` §十二） |
+| ④ 非零 / `VIEWPOINT_AUDIT_RESULT: FIX_REQUIRED` | 结论链不闭合、引用了封锁格子、出现禁令读数、或上游限制未带进结论 ⇒ 修报告后重跑④；**不得**用文字解释绕过 |
+| Step 3.1.5 `NUMERIC_AUDIT_RESULT: FIX_REQUIRED` | 先修数据包（或判明为脚本误判并回灌脚本），再重跑数值审核；**不得**带着未裁定的差异进 Agent C |
+| 采集阶段 `gate_status.json` 的 `deliverable=false` | 阻断级门禁失败：修数据重跑；确知影响面时用 `--allow-degraded` 重采集，并把 `degraded=true` 写进报告 Warnings |
+
+> ⚠️ **不要用"最终报告里没有数字"来换取 ① 通过**：省掉数字＝绕过绑定契约（旧实现里
+> 裸写错值 exit 0、绑定同一错值 exit 1，激励完全反了）。覆盖率门槛的作用正是堵这条路。
 
 ---
 
@@ -249,8 +345,8 @@ Task(
 
 | 异常情况 | 处理方式 |
 |---------|---------|
-| qualitative_report.md 不存在 | 停止，提示用户运行 /business-analysis |
-| data_pack_market.md 不存在 | 停止，提示用户运行 /business-analysis |
+| qualitative_report.md 不存在 | `ask_user_question`：先运行 /business-analysis（推荐）/ 停止 |
+| data_pack_market.md 不存在 | 同上 `ask_user_question` |
 | data_pack_report.md 不存在 | 继续（Agent B 降级方案：无附注数据） |
 | Tushare Token 无效或未配置 | --refresh-market 降级使用 yfinance fallback |
 | Step A --refresh-market 失败 | 检查 Python 环境和依赖，提示安装 |
@@ -275,7 +371,7 @@ Task(
 │   └── qualitative/                            ← 定性分析模块
 │       ├── coordinator.md                      ← 定性模块独立入口（/business-analysis）
 │       ├── qualitative_assessment.md           ← 6维度定性分析
-│       ├── data_collection.md                  ← 轻量级 WebSearch 指令
+│       ├── data_collection.md                  ← 轻量级 `web_search` 指令
 │       └── references/
 │           ├── output_schema.md                ← 结构化参数输出 schema
 │           ├── judgment_examples.md            ← 通用判断锚点

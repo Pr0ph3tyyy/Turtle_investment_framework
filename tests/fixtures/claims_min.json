@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0",
+  "stock_code": "TEST.HK",
+  "units": {
+    "trading_currency": "HKD",
+    "reporting_currency": "CNY",
+    "amount_unit": "百万",
+    "unit_label": "百万元"
+  },
+  "claims": [
+    {
+      "claim_id": "cm17.14.k080.ggpess",
+      "indicator": "悲观精算穿透回报率 GG_pess（k=0.80）",
+      "value": 4.66,
+      "unit": "%",
+      "entity": "TEST.HK",
+      "time": "2025",
+      "basis": "fixture：仅供 hermetic 测试，不代表任何真实标的",
+      "policy": "round:2",
+      "note": null,
+      "section": "17.14",
+      "display": "4.66%"
+    },
+    {
+      "claim_id": "cm17.14.k080.tbp",
+      "indicator": "悲观目标买入价（k=0.80）",
+      "value": 8.67,
+      "unit": "港元/股",
+      "entity": "TEST.HK",
+      "time": "2025",
+      "basis": "fixture：仅供 hermetic 测试，不代表任何真实标的",
+      "policy": "round:2",
+      "note": null,
+      "section": "17.14",
+      "display": "8.67"
+    }
+  ]
+}

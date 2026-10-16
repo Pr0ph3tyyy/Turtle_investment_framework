@@ -1,0 +1,70 @@
+{
+  "schema_version": "1.0",
+  "dimension": "D1",
+  "stock_code": "00506.HK",
+  "company_name": "中国食品有限公司",
+  "generated_at": "2026-10-13T02:32:00+08:00",
+  "slice": {
+    "provided_pages": [
+      3,
+      73
+    ],
+    "total_pages": 203,
+    "dropped_pages": 40,
+    "budget_chars": 12000,
+    "used_chars": 9800,
+    "source": "annual_report_2025.txt",
+    "declared_incomplete": true
+  },
+  "verdict": {
+    "headline": "切片未覆盖核心经营段落，资本特征无法可靠判定",
+    "confidence": "低",
+    "material_status": "不足"
+  },
+  "narrative": "本次切片仅覆盖目录附近与部分附注，缺少经营回顾与资本开支明细，无法对资本密集度作出可靠判断。",
+  "params": {
+    "business_model_clarity": "模糊",
+    "capital_intensity": "capital-hungry",
+    "collection_mode": "先货后款",
+    "cash_impact": "中性"
+  },
+  "key_metrics": [
+    {
+      "name": "资本开支",
+      "value": null,
+      "unit": "—",
+      "year": 2025,
+      "note": "切片未包含现金流量表附注",
+      "source": {
+        "kind": "inference",
+        "ref": "推断",
+        "basis": "切片页范围内无该数据"
+      }
+    }
+  ],
+  "evidence": [
+    {
+      "claim": "切片缺少经营讨论章节",
+      "source": {
+        "kind": "data_pack",
+        "ref": "DP§10"
+      }
+    }
+  ],
+  "uncertainty": [
+    "资本开支与折旧摊销均未获得",
+    "收款模式缺少应收/预收变动数据"
+  ],
+  "flags": [
+    {
+      "code": "data_insufficient",
+      "severity": "critical",
+      "detail": "核心经营段落缺失"
+    },
+    {
+      "code": "slice_truncated",
+      "severity": "warn",
+      "detail": "仅提供 2/203 页"
+    }
+  ]
+}

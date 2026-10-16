@@ -48,16 +48,32 @@ from scripts.pdf_preprocessor import (
 # ============================================================
 
 class TestSectionKeywords:
-    """Feature #38: Keyword library for 5 target sections."""
+    """Feature #38: Keyword library for the target sections.
 
-    def test_all_seven_sections_present(self):
-        assert set(SECTION_KEYWORDS.keys()) == {"P2", "P3", "P4", "P6", "P13", "MDA", "SUB"}
+    P14 (利润分配与股东回报规划) was added 2026-10-13 — documented factor-2 rule:
+    a minimum payout written in a public filing anchors M outright
+    (known_issues.md §3.21 21b).
+    """
 
-    @pytest.mark.parametrize("section_id", ["P2", "P3", "P4", "P6", "P13", "MDA", "SUB"])
+    def test_all_sections_present(self):
+        assert set(SECTION_KEYWORDS.keys()) == {
+            "P2", "P3", "P4", "P6", "P13", "P14", "MDA", "SUB"}
+
+    @pytest.mark.parametrize("section_id",
+                             ["P2", "P3", "P4", "P6", "P13", "P14", "MDA", "SUB"])
     def test_each_section_has_at_least_3_keywords(self, section_id):
         assert len(SECTION_KEYWORDS[section_id]) >= 3, (
             f"{section_id} has only {len(SECTION_KEYWORDS[section_id])} keywords"
         )
+
+    def test_p14_covers_chinese_and_traditional_keywords(self):
+        """P14 must match A-share and HK dividend-policy section headings."""
+        kw = SECTION_KEYWORDS["P14"]
+        for must in ("利润分配政策", "股东回报规划", "投资者回报规划",
+                     "利潤分配政策", "股東回報規劃"):
+            assert must in kw
+        assert "P14" in SECTION_ZONE_PREFERENCES
+        assert "P14" in SECTION_EXTRACT_CONFIG
 
     def test_keywords_are_nonempty_strings(self):
         for section_id, keywords in SECTION_KEYWORDS.items():

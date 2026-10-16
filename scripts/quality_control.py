@@ -182,14 +182,17 @@ def build_report(sections: Dict[str, str], pe_bands: List[float],
         parts.append("> ⚠️ CM§1 跳过：缺少 §3 利润表年度数据。\n")
     else:
         y0 = years[0]
+        # 港股（.HK）数据包按港式报表科目名渲染：营业额 / 经营溢利 / 除税后溢利 /
+        # 股东应占溢利 / 每股基本盈利。只认 A 股标签会让整份 CM 退化为空表
+        # （00696 实测：CM§1 全「—」、CM§4/§5 直接跳过）。
         items = [
-            ("营业收入", inc, ("营业收入",)),
-            ("营业利润", inc, ("营业利润",)),
-            ("净利润", inc, ("净利润",)),
-            ("归母净利润", inc, ("归母净利润",)),
+            ("营业收入", inc, ("营业收入", "营业额", "营运收入")),
+            ("营业利润", inc, ("营业利润", "经营溢利")),
+            ("净利润", inc, ("净利润", "除税后溢利", "期内溢利")),
+            ("归母净利润", inc, ("归母净利润", "股东应占溢利", "归属于母公司")),
             ("总资产", bs, ("总资产",)),
-            ("归母所有者权益", bs, ("归母所有者权益", "归母权益")),
-            ("经营活动现金流(OCF)", cf, ("经营活动现金流", "OCF")),
+            ("归母所有者权益", bs, ("归母所有者权益", "归母权益", "股东权益")),
+            ("经营活动现金流(OCF)", cf, ("经营活动现金流", "经营业务现金净额", "OCF")),
             ("自由现金流(FCF)", cf, ("自由现金流", "FCF")),
         ]
         headers = ["项目", f"{y0} 百万元", f"{y0} 亿元"] + [f"{y} 亿元" for y in years[1:]]
@@ -206,8 +209,10 @@ def build_report(sections: Dict[str, str], pe_bands: List[float],
     if len(years) < 2:
         parts.append("> ⚠️ CM§2 跳过：可比年度不足 2 年。\n")
     else:
-        yoy_items = [("营业收入", inc, ("营业收入",)), ("归母净利润", inc, ("归母净利润",)),
-                     ("净利润", inc, ("净利润",)), ("营业利润", inc, ("营业利润",))]
+        yoy_items = [("营业收入", inc, ("营业收入", "营业额", "营运收入")),
+                     ("归母净利润", inc, ("归母净利润", "股东应占溢利", "归属于母公司")),
+                     ("净利润", inc, ("净利润", "除税后溢利", "期内溢利")),
+                     ("营业利润", inc, ("营业利润", "经营溢利"))]
         headers = ["指标"] + [f"{years[i]} vs {years[i + 1]}" for i in range(len(years) - 1)]
         rows = []
         for label, src, names in yoy_items:
@@ -223,8 +228,8 @@ def build_report(sections: Dict[str, str], pe_bands: List[float],
         parts.append("> ⚠️ CM§3 跳过：缺少年度序列。\n")
     else:
         stat_specs = [
-            ("营业收入(亿元)", [to_yi(v) for v in _series(inc, find_item(inc, "营业收入"), years)]),
-            ("归母净利润(亿元)", [to_yi(v) for v in _series(inc, find_item(inc, "归母净利润"), years)]),
+            ("营业收入(亿元)", [to_yi(v) for v in _series(inc, find_item(inc, "营业收入", "营业额", "营运收入"), years)]),
+            ("归母净利润(亿元)", [to_yi(v) for v in _series(inc, find_item(inc, "归母净利润", "股东应占溢利", "归属于母公司"), years)]),
             ("ROE(%)", _series(fin, find_item(fin, "ROE", "净资产收益率"), _full_years(fin_cols))),
             ("毛利率(%)", _series(fin, find_item(fin, "毛利率"), _full_years(fin_cols))),
             ("净利率(%)", _series(fin, find_item(fin, "净利率"), _full_years(fin_cols))),
@@ -240,7 +245,7 @@ def build_report(sections: Dict[str, str], pe_bands: List[float],
     # ── CM§4 分红支付率 ──
     parts.append(format_header(2, "CM§4 分红支付率（总分红 ÷ 归母净利润）"))
     div_by_year = _dividends_by_year(sections.get("6", ""))
-    np_key = find_item(inc, "归母净利润")
+    np_key = find_item(inc, "归母净利润", "股东应占溢利", "归属于母公司")
     if not div_by_year or not np_key:
         parts.append("> ⚠️ CM§4 跳过：缺少 §6 分红或 §3 归母净利润。\n")
     else:
@@ -257,19 +262,33 @@ def build_report(sections: Dict[str, str], pe_bands: List[float],
 
     # ── CM§5 PE 估值链网格 ──
     parts.append(format_header(2, "CM§5 PE 估值链网格（目标价 = EPS × PE × 折扣）"))
-    eps_key = find_item(inc, "基本EPS", "基本每股收益", "EPS")
+    eps_key = find_item(inc, "基本EPS", "基本每股收益", "每股基本盈利", "EPS")
     eps = inc.get(eps_key, {}).get(years[0]) if (eps_key and years) else None
-    price = _num(kv1.get("当前价格"))
+    # §1 的价格行带币种后缀（A 股「当前价格 (元)」、港股「当前价格 (HKD)」），
+    # 必须按前缀查找并沿用其币种标签，否则港股整条 PE 链没有股价锚。
+    price_key = next((k for k in kv1 if k.startswith("当前价格")), None)
+    price = _num(kv1.get(price_key)) if price_key else None
+    price_unit = re.search(r"[（(]([^）)]+)[）)]", price_key or "")
+    price_unit = price_unit.group(1) if price_unit else "元"
     mktcap_wan = _num(kv1.get("总市值 (万元)")) or _num(kv1.get("总市值(万元)"))
     if eps is None:
         parts.append("> ⚠️ CM§5 跳过：缺少 §3 基本EPS。\n")
     else:
         note = f"> EPS = {years[0]} 基本EPS = {format_number(eps, divider=1)} 元"
         if price is not None:
-            note += f"；当前股价 = {format_number(price, divider=1)} 元"
+            note += f"；当前股价 = {format_number(price, divider=1)} {price_unit}"
         if mktcap_wan is not None:
             note += f"；总市值 = {format_number(mktcap_wan / 10000.0, divider=1)} 亿元（§1 万元 ÷ 10000）"
         parts.append(note + "\n")
+        # 币种护栏（known_issues.md P0-2）：EPS 取自报表（元），价格/市值取自交易币种。
+        # 港股若直接把「元/股」的网格与港元股价并列，会被读成同一单位的错误结论。
+        if price_unit != "元":
+            fx = re.search(r"1/(\d+(?:\.\d+)?)", sections.get("17", ""))
+            caveat = (f"> ⚠️ **币种不同**：本网格为**报表币种（元/股）**，当前股价为 **{price_unit}**。"
+                      f"两者不可直接比较")
+            caveat += (f"，须按 §17.8 的折算系数 ×1/{fx.group(1)} 换成 {price_unit}/股。\n" if fx
+                       else "，须先做币种折算（见 §17.8 币种说明）。\n")
+            parts.append(caveat)
         headers = ["PE \\ 折扣"] + [f"×{d:g}" for d in discounts]
         rows = []
         for pe in pe_bands:
@@ -291,7 +310,12 @@ def _dividends_by_year(block: str) -> Dict[str, float]:
         return {}
     header = rows[0]
     # locate 年度 col (0) and 总分红 col (contains 总分红)
-    div_idx = next((i for i, h in enumerate(header) if "总分红" in h), len(header) - 1)
+    # 没有「总分红」列时必须放弃，**不得**回退到最后一列：港股 §6 的最后一列是
+    # 「派息率(%)」（且该 DPS 序列已被 fail-closed 标注为上游快照失真），
+    # 误读会把派息率当成"总分红(百万元)"算出荒诞的支付率。
+    div_idx = next((i for i, h in enumerate(header) if "总分红" in h), None)
+    if div_idx is None:
+        return {}
     agg: Dict[str, float] = {}
     for r in rows[1:]:
         yr = r[0].strip()

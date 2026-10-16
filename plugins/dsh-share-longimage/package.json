@@ -1,0 +1,28 @@
+{
+  "name": "dsh-plugin-share-longimage",
+  "version": "0.1.0",
+  "private": true,
+  "description": "把龟龟投资框架的成果文件渲染成中文精选长图（B 站分享用，Claude 版式）",
+  "type": "module",
+  "main": "lib/host.js",
+  "exports": {
+    ".": "./lib/host.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/host.js",
+    "assets/render_longimage.py",
+    "assets/brief.example.json",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4"
+  }
+}

@@ -82,8 +82,8 @@ class TestDataPackMarketSchema:
 
     def test_agent_placeholder_sections(self):
         """Agent-only sections (§8, §10) have placeholder markers."""
-        assert "§8 待Agent WebSearch补充" in self.result
-        assert "§10 待Agent WebSearch补充" in self.result
+        assert "§8 待Agent补充" in self.result
+        assert "§10 待Agent补充" in self.result
 
     def test_completion_summary(self):
         """Output ends with completion summary line."""

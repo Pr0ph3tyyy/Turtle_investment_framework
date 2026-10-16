@@ -1,0 +1,17 @@
+{
+ "field_coverage/00506_中国食品": "09435473773f6a6d",
+ "invariants/00506_中国食品": "68e8459e4553671c",
+ "instrument_audit/00506_中国食品": "7738a32213499e81",
+ "field_coverage/600011_华能国际": "fef04c2cef087e30",
+ "invariants/600011_华能国际": "54834b16597b499f",
+ "instrument_audit/600011_华能国际": "f93e2f5b5ab1f18e",
+ "field_coverage/601991_大唐发电": "d41c3ba3a66b04ef",
+ "invariants/601991_大唐发电": "5defa532c00dc0ed",
+ "instrument_audit/601991_大唐发电": "795ba45c6161a9c3",
+ "field_coverage/600016_民生银行": "d41c3ba3a66b04ef",
+ "invariants/600016_民生银行": "5defa532c00dc0ed",
+ "instrument_audit/600016_民生银行": "65864f24f704ab3f",
+ "field_coverage/000157_中联重科": "fef04c2cef087e30",
+ "invariants/000157_中联重科": "54834b16597b499f",
+ "instrument_audit/000157_中联重科": "33251d4bad57bb2b"
+}

@@ -1,73 +1,127 @@
-"""Tests for coordinator.md prompt — phase ordering, commands, and slash command."""
+"""Tests for the ACTIVE coordinators — not the v1 archive.
+
+These tests used to read ``prompts/coordinator.md``, the v1 archive that no pipeline
+uses any more, and asserted Claude Code tool names (``WebSearch``,
+``AskUserQuestion``). They therefore passed while guarding a dead file. They now guard
+the live coordinators:
+
+- ``strategies/turtle/coordinator.md``  — 龟龟 pipeline: Step A → 3.1 Agent B → 3.2 Agent C
+- ``shared/qualitative/coordinator.md`` — 商业分析: data collection → PDF → 审计门
+
+``TestSlashCommand`` still guards ``.claude/commands/turtle-analysis.md``, which remains
+a Claude Code artifact that ships with the repo (see ``AGENTS.md`` for the DSH entry).
+"""
 
 import os
-import re
 
 import pytest
 
-PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "..", "prompts")
-COMMANDS_DIR = os.path.join(os.path.dirname(__file__), "..", ".claude", "commands")
+REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
+TURTLE_COORDINATOR = os.path.join(REPO_ROOT, "strategies", "turtle", "coordinator.md")
+BA_COORDINATOR = os.path.join(REPO_ROOT, "shared", "qualitative", "coordinator.md")
+COMMANDS_DIR = os.path.join(REPO_ROOT, ".claude", "commands")
 
 
-@pytest.fixture(scope="module")
-def coordinator_content():
-    """Load coordinator.md content once for all tests."""
-    path = os.path.join(PROMPTS_DIR, "coordinator.md")
+def _read(path):
     with open(path, encoding="utf-8") as f:
         return f.read()
 
 
-class TestCoordinatorFlow:
-    """Verify coordinator prompt defines correct multi-phase pipeline."""
+@pytest.fixture(scope="module")
+def coordinator_content():
+    """Active turtle coordinator."""
+    return _read(TURTLE_COORDINATOR)
 
-    def test_phase_ordering(self, coordinator_content):
-        """Coordinator defines Phase 0 → 1A → 1B → 2A → 2B → 3 flow."""
-        # Find positions of phase mentions to verify ordering
-        phases = ["Phase 0", "Phase 1A", "Phase 1B", "Phase 2A", "Phase 2B", "Phase 3"]
-        # Verify all phases are mentioned
-        for phase in phases:
-            assert phase in coordinator_content or phase.replace("Phase ", "phase") in coordinator_content, \
-                f"Missing phase: {phase}"
 
-    def test_phase1a_bash_command(self, coordinator_content):
-        """Phase 1A references tushare_collector.py bash command."""
+@pytest.fixture(scope="module")
+def ba_coordinator_content():
+    """Active business-analysis coordinator."""
+    return _read(BA_COORDINATOR)
+
+
+class TestTurtleCoordinator:
+    """Verify the active 龟龟 pipeline is wired correctly."""
+
+    def test_coordinator_exists(self):
+        assert os.path.exists(TURTLE_COORDINATOR)
+
+    def test_pipeline_ordering(self, coordinator_content):
+        """Steps must appear in order: Step A → 3.1 (Agent B) → 3.2 (Agent C)."""
+        idx = [coordinator_content.find(s) for s in ("Step A", "Step 3.1", "Step 3.2")]
+        assert -1 not in idx, "a pipeline step is missing"
+        assert idx == sorted(idx), "pipeline steps are out of order"
+
+    def test_market_refresh_command(self, coordinator_content):
+        """Step A refreshes the market sections through the collector."""
         assert "tushare_collector.py" in coordinator_content
+        assert "--refresh-market" in coordinator_content
 
-    def test_phase2a_bash_command(self, coordinator_content):
-        """Phase 2A references pdf_preprocessor.py bash command."""
-        assert "pdf_preprocessor.py" in coordinator_content
+    def test_quantitative_agent_dispatch(self, coordinator_content):
+        """Step 3.1 dispatches Agent B to the quantitative prompt."""
+        assert "phase3_quantitative.md" in coordinator_content
+        assert "Agent B" in coordinator_content
 
-    def test_phase1b_agent_websearch(self, coordinator_content):
-        """Phase 1B dispatches to agent for WebSearch."""
-        assert "WebSearch" in coordinator_content
+    def test_valuation_agent_dispatch(self, coordinator_content):
+        """Step 3.2 dispatches Agent C to the valuation prompt."""
+        assert "phase3_valuation.md" in coordinator_content
+        assert "Agent C" in coordinator_content
 
-    def test_phase2b_agent_extraction(self, coordinator_content):
-        """Phase 2B dispatches to agent for PDF structured extraction."""
-        assert "phase2_PDF解析" in coordinator_content or "Phase 2B" in coordinator_content
+    def test_prerequisites_are_the_ba_outputs(self, coordinator_content):
+        """The pipeline consumes the business-analysis deliverables."""
+        assert "qualitative_report.md" in coordinator_content
+        assert "data_pack_market.md" in coordinator_content
+        assert "data_pack_report.md" in coordinator_content  # optional; degraded mode
 
-    def test_phase3_analysis_dispatch(self, coordinator_content):
-        """Phase 3 dispatches to analysis and report generation."""
-        assert "phase3_分析与报告" in coordinator_content or "Phase 3" in coordinator_content
+    def test_uses_dsh_tool_names(self, coordinator_content):
+        """Interaction/search use DSH tool names, not Claude Code ones."""
+        assert "ask_user_question" in coordinator_content
+        assert "web_search" in coordinator_content
+        assert "AskUserQuestion" not in coordinator_content
+        assert "WebSearch" not in coordinator_content
 
-    def test_no_pdf_alternative(self, coordinator_content):
-        """Coordinator defines graceful degradation when no PDF available."""
-        assert "降级" in coordinator_content or "no-PDF" in coordinator_content.lower() or \
-            "跳过" in coordinator_content
+    def test_ask_user_question_interaction_points(self, coordinator_content):
+        """Several decision points are surfaced to the user."""
+        count = coordinator_content.count("ask_user_question")
+        assert count >= 3, f"Expected >=3 ask_user_question references, got {count}"
 
     def test_file_path_convention(self, coordinator_content):
-        """Coordinator uses {output_dir} convention for file paths."""
-        assert "output_dir" in coordinator_content or "output/" in coordinator_content
+        """Paths follow the {output_dir} convention."""
+        assert "{output_dir}" in coordinator_content or "output/" in coordinator_content
 
-    def test_ask_user_question_templates(self, coordinator_content):
-        """Coordinator defines AskUserQuestion interaction points."""
-        assert "AskUserQuestion" in coordinator_content
-        # Should have multiple AskUserQuestion blocks
-        count = coordinator_content.count("AskUserQuestion")
-        assert count >= 3, f"Expected ≥3 AskUserQuestion references, got {count}"
+    def test_graceful_degradation(self, coordinator_content):
+        """Degraded paths are defined (missing PDF footnotes / failed refresh)."""
+        assert "降级" in coordinator_content or "跳过" in coordinator_content
+
+
+class TestBusinessAnalysisCoordinator:
+    """The active 商业分析 coordinator owns the PDF + pre-computation steps."""
+
+    def test_coordinator_exists(self):
+        assert os.path.exists(BA_COORDINATOR)
+
+    def test_pdf_preprocessing_wired(self, ba_coordinator_content):
+        """PDF section extraction is part of the BA pipeline."""
+        assert "pdf_preprocessor.py" in ba_coordinator_content
+
+    def test_deterministic_precomputation_wired(self, ba_coordinator_content):
+        """CM§1-§5 deterministic pre-computation is part of the BA pipeline."""
+        assert "quality_control.py" in ba_coordinator_content
+
+    def test_uses_dsh_tool_names(self, ba_coordinator_content):
+        assert "web_search" in ba_coordinator_content
+        assert "WebSearch" not in ba_coordinator_content
+        assert "AskUserQuestion" not in ba_coordinator_content
+
+    def test_file_path_convention(self, ba_coordinator_content):
+        assert "{output_dir}" in ba_coordinator_content or "output/" in ba_coordinator_content
 
 
 class TestSlashCommand:
-    """Verify the turtle-analysis slash command file."""
+    """Verify the turtle-analysis Claude Code slash command file.
+
+    This file is a Claude Code artifact we still ship; AGENTS.md documents the DSH
+    entry point (read the coordinator markdown instead of invoking a slash command).
+    """
 
     @pytest.fixture(autouse=True)
     def setup(self):

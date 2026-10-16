@@ -1,0 +1,21 @@
+# 精华长图 bundle —— 往 profile 根插入一行宿主插件。
+#
+# 插件本体零第三方 import（只用 node: 内建模块），因此不需要在本 profile 里再安装
+# 任何 @deepseek-ai/* 包：它通过注入的 `tools` 服务注册工具，用子进程调用
+# Python 渲染脚本出图。配置字段见 README.md。
+
+- insert:
+    - id: share-longimage
+      name: 'dsh-plugin-share-longimage'
+      config:
+        # 留空表示自动探测：工作目录向上找 .venv/bin/python，找不到就用 python3
+        pythonPath: null
+        # 留空表示自动探测 Chrome/Chromium（macOS 常见路径 + PATH）
+        chromePath: null
+        # B 站长图刻度：1080 宽下正文 30px，手机上约合 11–12pt
+        width: 1080
+        panelHeight: 1440
+        maxLongHeight: 16000
+        theme: paper
+        timeoutMs: 600000
+        presentDeliverables: true

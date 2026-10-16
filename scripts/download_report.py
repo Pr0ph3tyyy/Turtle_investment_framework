@@ -2,7 +2,7 @@
 """
 财报PDF下载工具 (Financial Report PDF Downloader)
 
-从 stockn.xueqiu.com 或 notice.10jqka.com.cn 下载A股/港股财报PDF文件。
+从 cninfo.com.cn / stockn.xueqiu.com / notice.10jqka.com.cn / hkexnews.hk 下载A股/港股财报PDF文件。
 支持年报、中报、一季报、三季报。
 
 Usage:
@@ -46,7 +46,10 @@ BASE_HEADERS = {
 }
 
 URL_PATTERN = re.compile(
-    r"^https?://(stockn\.xueqiu\.com|[\w.-]*10jqka\.com\.cn|[\w.-]*cninfo\.com\.cn)/.+\.pdf$",
+    r"^https?://(stockn\.xueqiu\.com|[\w.-]*10jqka\.com\.cn|[\w.-]*cninfo\.com\.cn"
+    # 港股专属发行人（如 00696.HK，非 A+H）在 cninfo/雪球/同花顺 均取不到年报，
+    # 其唯一权威披露源是香港交易所披露易 hkexnews.hk（对应 A 股的巨潮）。
+    r"|[\w.-]*hkexnews\.hk)/.+\.pdf$",
     re.IGNORECASE,
 )
 
@@ -58,6 +61,8 @@ def get_headers(url):
         headers["Referer"] = "https://www.cninfo.com.cn/"
     elif "10jqka.com.cn" in url:
         headers["Referer"] = "https://10jqka.com.cn/"
+    elif "hkexnews.hk" in url:
+        headers["Referer"] = "https://www.hkexnews.hk/"
     else:
         headers["Referer"] = "https://xueqiu.com/"
     return headers
@@ -65,10 +70,10 @@ def get_headers(url):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Download financial report PDF from cninfo.com.cn, stockn.xueqiu.com, or 10jqka.com.cn"
+        description="Download financial report PDF from cninfo.com.cn, stockn.xueqiu.com, 10jqka.com.cn, or hkexnews.hk"
     )
     parser.add_argument(
-        "--url", required=True, help="PDF URL from cninfo.com.cn, stockn.xueqiu.com, or 10jqka.com.cn"
+        "--url", required=True, help="PDF URL from cninfo.com.cn, stockn.xueqiu.com, 10jqka.com.cn, or hkexnews.hk"
     )
     parser.add_argument(
         "--stock-code", required=True, help="Stock code (e.g. SH600887, 00700)"
@@ -98,7 +103,7 @@ def validate_url(url):
     if not URL_PATTERN.match(url):
         return False, (
             f"Invalid URL: {url}\n"
-            "URL must be a .pdf link from cninfo.com.cn, stockn.xueqiu.com, or 10jqka.com.cn"
+            "URL must be a .pdf link from cninfo.com.cn, stockn.xueqiu.com, 10jqka.com.cn, or hkexnews.hk"
         )
     return True, ""
 
@@ -209,7 +214,7 @@ def download_annual_report(url, save_path, max_retries=DEFAULT_MAX_RETRIES):
 
 def print_result(success, filepath="", filesize=0, url="", stock_code="",
                  report_type="", year="", message=""):
-    """Print structured result block for Claude to parse."""
+    """Print structured result block for the calling agent to parse."""
     status = "SUCCESS" if success else "FAILED"
     print("\n---RESULT---")
     print(f"status: {status}")

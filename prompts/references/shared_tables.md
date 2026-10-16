@@ -1,5 +1,10 @@
 # 共享参数表：支付率计算、股息税率与门槛公式
 
+> ⚠️ **v1 存档，已被 [`strategies/turtle/references/shared_tables.md`](../../strategies/turtle/references/shared_tables.md) 取代。**
+> 活跃流程（`strategies/turtle/phase3_*.md`）只加载后者。**请勿依据本文件改代码** ——
+> 其「门槛值 II」一节的**美股档位 `max(5%, Rf+3%)` 与现行实现不一致**，
+> 是 2026-10 前"三处重复实现 + 文档-代码漂移"的来源之一（`known_issues.md` P1-12）。
+
 > 本文件为因子2和因子3的共享参考。Phase 3 执行器在执行因子2前加载本文件，因子3沿用。
 
 ---

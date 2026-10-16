@@ -8,10 +8,92 @@ import re
 import pandas as pd
 
 from format_utils import format_number, format_table, format_header
+from rf_utils import rf_text_is_failure
+from claim_ledger import ClaimLedger
+from section_contract import (
+    REASONS,
+    STATUS_MISSING,
+    STATUS_OK,
+    SECTION_TITLES,
+    SectionRegistry,
+)
 
 
 class AssemblyMixin:
     """Mixin providing data pack assembly for TushareClient."""
+
+    # sub_methods 的标签 → §17 小节号。两份清单必须一一对应：section_contract
+    # 的目录是 fail-closed 的，漏登记的小节会被记为 missing 而不是静默通过。
+    _LABEL_TO_SECTION = {
+        "财务趋势速览": "17.1",
+        "因子2输入参数": "17.2",
+        "因子3·真实现金收入": "17.3",
+        "因子3·经营性现金支出": "17.4",
+        "因子3·基准可支配结余": "17.5",
+        "因子4·股价分位": "17.6",
+        "控股结构辅助": "17.7",
+        "因子4·绝对估值与基准价": "17.8",
+        "因子4·业绩下滑敏感性": "17.9",
+        "支付率三重校验": "17.10",
+        "穿透回报率网格": "17.11",
+        "G 系数网格": "17.12",
+        "收入敏感性": "17.13",
+        "悲观基准网格": "17.14",
+        "防御性净值": "17.15",
+        "防御性门槛组": "17.16",
+    }
+
+    def _claim_ledger(self, ts_code: str = "", reset: bool = False) -> ClaimLedger:
+        """Lazily create the claim ledger for this run (known_issues.md P2-20 改动 1/2).
+
+        Claims are the machine-checkable substrate: each §17 value the Agent may
+        quote is registered with ``(indicator, value, unit, time, basis, policy)``
+        so a verifier can bind what the report says back to what Python computed.
+        """
+        ledger = None if reset else self._store.get("_claim_ledger")
+        if ledger is None:
+            ledger = ClaimLedger(ts_code)
+            self._store["_claim_ledger"] = ledger
+        elif ts_code and not ledger.stock_code:
+            ledger.stock_code = ts_code
+        return ledger
+
+    @staticmethod
+    def _aa_slug(label: str) -> str:
+        """'AA_2y' → 'aa2y' (used inside claim ids)."""
+        return label.lower().replace("_", "").replace(" ", "")
+
+    @staticmethod
+    def _method_slug(label: str) -> str:
+        """Map an M-method label to an id-safe slug.
+
+        The method belongs **inside** the claim id (it fully identifies the
+        quantity) so the human-readable ``indicator`` can stay stable across runs.
+        Putting the varying part in the indicator instead makes a legitimate
+        recompute look like an id collision.
+        """
+        fixed = {"法1": "m1", "法2": "m2", "法3": "m3",
+                 "承诺(支付率)": "commitpct", "承诺(金额折算)": "commitamt"}
+        if label in fixed:
+            return fixed[label]
+        slug = "".join(ch for ch in str(label) if ch.isalnum())
+        return slug or "mx"
+
+    def _section_registry(self, reset: bool = False) -> SectionRegistry:
+        """Return this run's §17 status registry.
+
+        Kept in ``_store`` so individual ``_compute_*`` methods can mark their own
+        section with a precise reason; assembly falls back to inference when they
+        do not. ``reset=True`` starts a fresh registry — required because
+        ``compute_derived_metrics`` may be called twice on one client (e.g. the
+        3-B flow: run without a rate, seed ``--rf``, run again), and a stale
+        ``missing`` must not survive a successful recompute.
+        """
+        registry = None if reset else self._store.get("_section_registry")
+        if registry is None:
+            registry = SectionRegistry()
+            self._store["_section_registry"] = registry
+        return registry
 
     def compute_derived_metrics(self, ts_code: str) -> str:
         """Compute §17: Derived metrics from stored DataFrames.
@@ -25,38 +107,205 @@ class AssemblyMixin:
             "",
         ]
 
+        # (label, callable) — labels are used to report *which* blocks could not
+        # be computed. They intentionally contain no section numbers so that a
+        # partially-computed pack is never mistaken for one containing the
+        # corresponding grids (see tests/test_derived_metrics*.py).
         sub_methods = [
-            self._compute_financial_trends,
-            lambda: self._compute_factor2_inputs(ts_code),
-            self._compute_factor3_step1,
-            self._compute_factor3_step4,
-            self._compute_factor3_sensitivity_base,
-            self._compute_factor4_inputs,
-            self._compute_sotp_inputs,
-            lambda: self._compute_factor4_ev_baseline(ts_code),
-            lambda: self._compute_factor4_sensitivity(ts_code),
-            # §17.10-17.13 grids (run after §17.5 which populates factor3_sensitivity;
-            # §17.10 must precede §17.11/§17.13 which read _store["payout_crosscheck"])
-            self._compute_payout_crosscheck,
-            lambda: self._compute_penetration_grid(ts_code),
-            self._compute_g_grid,
-            lambda: self._compute_revenue_sensitivity(ts_code),
+            ("财务趋势速览", self._compute_financial_trends),
+            ("因子2输入参数", lambda: self._compute_factor2_inputs(ts_code)),
+            ("因子3·真实现金收入", self._compute_factor3_step1),
+            ("因子3·经营性现金支出", self._compute_factor3_step4),
+            ("因子3·基准可支配结余", lambda: self._compute_factor3_sensitivity_base(ts_code)),
+            ("因子4·股价分位", lambda: self._compute_factor4_inputs(ts_code)),
+            ("控股结构辅助", self._compute_sotp_inputs),
+            ("因子4·绝对估值与基准价", lambda: self._compute_factor4_ev_baseline(ts_code)),
+            ("因子4·业绩下滑敏感性", lambda: self._compute_factor4_sensitivity(ts_code)),
+            # 17.10-17.13 grids (run after 17.5 which populates factor3_sensitivity;
+            # payout cross-check must precede the penetration/revenue grids which
+            # read _store["payout_crosscheck"])
+            ("支付率三重校验", self._compute_payout_crosscheck),
+            ("穿透回报率网格", lambda: self._compute_penetration_grid(ts_code)),
+            ("G 系数网格", lambda: self._compute_g_grid(ts_code)),
+            ("收入敏感性", lambda: self._compute_revenue_sensitivity(ts_code)),
+            ("悲观基准网格", lambda: self._compute_pessimistic_grid(ts_code)),
+            ("防御性门槛组", lambda: self._compute_defensive_gates(ts_code)),
+            ("防御性净值", lambda: self._compute_defensive_net_asset(ts_code)),
         ]
 
-        for method in sub_methods:
+        registry = self._section_registry(reset=True)
+        # 账本在此建立，确保 stock_code 正确（§17.10 早于 §17.11 运行，
+        # 若等到 §17.11 才建，早先登记的声明会带上空 stock_code）
+        self._claim_ledger(ts_code, reset=True)
+        missing: list[str] = []
+        for label, method in sub_methods:
+            number = self._LABEL_TO_SECTION.get(label)
+            # §17.9 按文档必须与 §17.11 表B **同源 M**（§17.10 的 M_rec），但渲染顺序上
+            # §17.9 在 §17.10 之前 ⇒ 不先算就会静默回落到 §17.1 的 3 年均值，并且仍在包里
+            # 打印「口径与 §17.11 表B 一致」（实测 06862：M 89.70% vs M_rec 81.11%，
+            # base GG 6.44% vs 5.82%，同包自相矛盾；独立审计 P0）。这里先**静默算一次**
+            # （返回值丢弃，随后在其正常位置渲染）；该函数每次重建同一个 dict，可重入、不耗 API。
+            if number == "17.9" and not self._store.get("payout_crosscheck"):
+                try:
+                    self._compute_payout_crosscheck()
+                except Exception:  # noqa: BLE001 — 与主循环一致：单节失败不中断整包
+                    pass
             try:
                 result = method()
                 if result:
                     lines.append(result)
                     lines.append("")
+                    if number and not registry.is_marked(number):
+                        registry.mark(number, STATUS_OK)
+                else:
+                    # Previously this was silently dropped, so a data-pack could
+                    # lose e.g. the penetration-return grid with no trace at all.
+                    missing.append(label)
+                    if number and not registry.is_marked(number):
+                        registry.mark(number, STATUS_MISSING,
+                                      self._infer_missing_reason(label, ts_code))
             except Exception as e:
                 name = getattr(method, "__name__", str(method))
                 lines.append(f"*{name} 计算失败: {e}*")
                 lines.append("")
+                missing.append(label)
+                if number:
+                    # 用 _safe_mark：标记失败不得顶替原始异常、也不得中断整包
+                    self._safe_mark(registry, number, STATUS_MISSING, "exception", note=str(e))
 
+        # 始终输出状态表：缺席必须可判定，且缺失原因要指向补救动作
+        lines.append(self._section_status_block(registry, ts_code))
+        lines.append("")
+        units = self._contract_units(ts_code)
+        self._store["section17_status"] = registry.finalize(ts_code, units)
+        if "_claim_ledger" in self._store:
+            self._store["claims_payload"] = self._store["_claim_ledger"].snapshot(units)
         return "\n".join(lines)
 
-    # --- Refresh-market helpers ---
+    def _close_available(self) -> bool:
+        """True when a usable close price is in ``_store["basic_info"]``."""
+        basic = self._store.get("basic_info")
+        if basic is None or getattr(basic, "empty", True):
+            return False
+        try:
+            value = basic.iloc[0].get("close")
+        except (IndexError, AttributeError):
+            return False
+        try:
+            return value is not None and float(value) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _safe_mark(self, registry, number, status, reason, note=None):
+        """错误处理器专用的 `mark()`：**记录失败但绝不抛**。见 known_issues.md §三十。
+
+        `SectionRegistry.mark()` 在「number 未知」或「reason 不在受控词表」时会
+        `raise SectionMarkError`。而它被调用的位置是 `except` 分支 —— 一旦它自己抛，
+        一个**受控的缺失**会升级成**整包生成失败**，且原始异常被顶掉。
+        错误处理器不得比它处理的错误更脆弱。
+        """
+        try:
+            registry.mark(number, status, reason, note=note)
+        except Exception as e:  # noqa: BLE001 —— 就是要吞掉，但必须留痕
+            self._store.setdefault("_mark_failures", []).append(
+                f"§{number} 标记失败（status={status} reason={reason}）：{type(e).__name__}: {e}")
+
+    def _infer_missing_reason(self, label: str, ts_code: str) -> str:
+        """Best-effort reason code for a section that returned nothing.
+
+        Only used when the ``_compute_*`` method did not mark its own section;
+        ``no_data`` is the honest fallback (it asserts nothing specific).
+        """
+        rf_df = self._store.get("risk_free_rate")
+        rf_unavailable = rf_df is None or getattr(rf_df, "empty", False)
+        if rf_unavailable and label in self._RF_DEPENDENT_LABELS:
+            return "no_rf"
+        if label == "控股结构辅助":
+            return "not_applicable"
+        # 收盘价缺失优先于市场特性：它会让所有依赖价格/股数的小节一并缺席，
+        # 而"港股字段缺口"只是其中一个可能原因（实测 2026-10-13：hk_daily 配额用尽）
+        if not self._close_available():
+            return "no_price"
+        if self._is_hk(ts_code) and self._LABEL_TO_SECTION.get(label) in ("17.6", "17.8"):
+            return "hk_field_gap"
+        return "no_data"
+
+    def _contract_units(self, ts_code: str) -> dict:
+        """Unit/currency declarations for the §17 contract payload.
+
+        ``reporting_currency`` is only asserted when it was *explicitly* confirmed
+        (fx.json / --fx-hkd-cny); otherwise it stays ``null`` with a warning rather
+        than defaulting to the ticker suffix — defaulting is how the HK CNY/HKD
+        mixup survived (known_issues.md P0-2).
+        """
+        units = {
+            "trading_currency": self._detect_trading_currency(ts_code),
+            "reporting_currency": self._reporting_currency(ts_code),
+            "amount_unit": "百万",
+            "unit_label": self._unit_label(),
+        }
+        if units["reporting_currency"] is None:
+            units["reporting_currency_unconfirmed"] = True
+        fx = self._store.get("fx") or {}
+        if fx.get("factor_to_reporting"):
+            units["fx"] = {k: fx[k] for k in ("factor_to_reporting", "date", "source") if k in fx}
+        return units
+
+    def _section_status_block(self, registry: SectionRegistry, ts_code: str) -> str:
+        """Render the §17 status table for the data pack.
+
+        This replaces the previous prose-only "以下预计算小节未生成" notice. The
+        critical behavioural change is the last line: a non-ok section means
+        **stop**, not "hand-calculate it" — the 4 hand-calculation fallbacks in
+        ``phase3_quantitative.md`` were exactly how the core invariant
+        "LLM 不做算术" got violated (known_issues.md P2-20).
+        """
+        # 无编号：这是**关于 §17 的元数据**，不是 §17 的计算小节。
+        # 若编号（如 17.17）会被 headings_in_pack 误判为数据小节，破坏
+        # 「`### 17.N` 存在 ⟺ status ok」这条不变式。
+        header = [format_header(3, "§17 小节状态（机器可读副本：section17_status.json）"), ""]
+        rows = []
+        bad = []
+        for number in sorted(SECTION_TITLES, key=lambda n: int(n.split(".")[1])):
+            mark = registry.finalize(ts_code, {})["sections"].get(number, {})
+            status = mark.get("status", STATUS_MISSING)
+            if status == STATUS_OK:
+                icon, detail = "✅ ok", "—"
+            elif status == "degraded":
+                icon, detail = "⚠️ degraded", mark.get("note") or mark.get("reason_label", "")
+            else:
+                icon = "❌ missing"
+                detail = mark.get("reason_label", "")
+                if mark.get("remedy"):
+                    detail += f" → 补救：{mark['remedy']}"
+                bad.append(number)
+            rows.append([f"§{number}", SECTION_TITLES[number], icon, detail or "—"])
+        body = format_table(["小节", "标题", "状态", "原因 / 补救"],
+                            rows, alignments=["l", "l", "l", "l"])
+        note = ("> **状态语义**：`ok` = 数值可直接引用；`degraded` = 已生成但带降级说明；"
+                "`missing` = **未生成**。")
+        if bad:
+            note += (f"\n> ⚠️ **本节缺失：{'、'.join(bad)}** —— "
+                     "**不得手算、不得按 0 处理**。请停止该小节的引用，"
+                     "把缺失原因与补救动作写入报告 Warnings 后继续其余小节。")
+        else:
+            note += "\n> ✅ 全部小节均已生成。"
+        return "\n".join(header + [body, "", note])
+
+    # Blocks that cannot be computed without a risk-free rate (§14)
+    #: 缺 Rf（⇒ 缺 II）时必然算不出来的小节。**§17.14 悲观基准网格必须在内** ——
+    #: 它的目标买入价 = 现价 × GG_pess / II、`vs 门槛` = GG_pess − II，与 §17.11 同依赖。
+    #: 漏掉的后果是**原因码写错**：实测（00696.HK，不传 --rf，2026-10-14）
+    #:   §17.9/§17.11/§17.13 → `no_rf`
+    #:   §17.14            → `no_data`  ← 错
+    #: `no_rf` 的补救是「传 --rf」，`no_data` 的补救是「去找上游数据」——
+    #: 标错会把读者引向完全错误的修法（findings D-9）。
+    _RF_DEPENDENT_LABELS = frozenset({
+        "因子4·业绩下滑敏感性",
+        "穿透回报率网格",
+        "收入敏感性",
+        "悲观基准网格",
+    })
 
     @staticmethod
     def _parse_sections(content: str):
@@ -107,7 +356,7 @@ class AssemblyMixin:
         timestamp = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
         currency = self._detect_currency(ts_code)
         self._currency = currency
-        unit_label = {"HKD": "百万港元", "USD": "百万美元"}.get(currency, "百万元")
+        unit_label = self._unit_label()
         lines = [
             format_header(1, f"数据包 — {ts_code}"),
             "",
@@ -115,10 +364,14 @@ class AssemblyMixin:
             f"*数据来源: Tushare Pro*",
             f"*金额单位: {unit_label} (除特殊标注)*",
         ]
-        if currency == "HKD":
-            lines.append("*报表币种: HKD*")
-        elif currency == "USD":
-            lines.append("*报表币种: USD*")
+        # 交易币种 ≠ 报表币种（known_issues.md P0-2）。旧版把 `_detect_currency`
+        # 的结果标成"报表币种"，而它其实是交易币种 —— 06862 的报表币种是 CNY。
+        lines.append(f"*交易币种: {currency}（价格与市值口径）*")
+        reporting = self._reporting_currency(ts_code)
+        if reporting:
+            lines.append(f"*报表币种: {reporting}（三张财务报表口径）*")
+        else:
+            lines.append("*报表币种: **未确认**（港股需 fx.json / --fx-hkd-cny 显式确认）*")
         lines.extend(["", "---", ""])
         return "\n".join(lines)
 
@@ -180,6 +433,15 @@ class AssemblyMixin:
                     # Ensure section text ends with a newline for clean joining
                     if not fresh_md.endswith("\n"):
                         fresh_md += "\n"
+                    # §14 protection: a failed API fetch returns a "数据缺失"
+                    # string *without raising*, so the exception handler below
+                    # never fires and a manually supplemented risk-free rate
+                    # (e.g. WebSearch fallback written by the coordinator) was
+                    # silently overwritten. Keep the usable old text instead.
+                    if key == "14" and rf_text_is_failure(fresh_md) and not rf_text_is_failure(text):
+                        print("  ⚠️ §14 无风险利率刷新失败（接口无权限），保留数据包中已有数值")
+                        new_sections.append((key, text))
+                        continue
                     new_sections.append((key, fresh_md))
                 except Exception as e:
                     print(f"  ⚠️ Failed to refresh {name}: {e}, keeping old data")
@@ -214,7 +476,7 @@ class AssemblyMixin:
         timestamp = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
         currency = self._detect_currency(ts_code)
         self._currency = currency
-        unit_label = {"HKD": "百万港元", "USD": "百万美元"}.get(currency, "百万元")
+        unit_label = self._unit_label()
         lines = [
             format_header(1, f"数据包 — {ts_code}"),
             "",
@@ -222,10 +484,14 @@ class AssemblyMixin:
             f"*数据来源: Tushare Pro*",
             f"*金额单位: {unit_label} (除特殊标注)*",
         ]
-        if currency == "HKD":
-            lines.append(f"*报表币种: HKD*")
-        elif currency == "USD":
-            lines.append(f"*报表币种: USD*")
+        # 交易币种 ≠ 报表币种（known_issues.md P0-2）。旧版把 `_detect_currency`
+        # 的结果标成"报表币种"，而它其实是交易币种 —— 06862 的报表币种是 CNY。
+        lines.append(f"*交易币种: {currency}（价格与市值口径）*")
+        reporting = self._reporting_currency(ts_code)
+        if reporting:
+            lines.append(f"*报表币种: {reporting}（三张财务报表口径）*")
+        else:
+            lines.append("*报表币种: **未确认**（港股需 fx.json / --fx-hkd-cny 显式确认）*")
         lines.extend(["", "---", ""])
 
         if self._is_us(ts_code):
@@ -329,7 +595,7 @@ class AssemblyMixin:
         ]:
             lines.append(format_header(2, f"{sec_num}. {sec_name}"))
             lines.append("")
-            lines.append(f"*[§{sec_num} 待Agent WebSearch补充]*")
+            lines.append(f"*[§{sec_num} 待Agent补充]*")
             lines.append("")
 
         # §17 Derived metrics (pre-computed from stored DataFrames)
@@ -436,9 +702,9 @@ class AssemblyMixin:
                          "§3P/§4P母公司报表在HKFRS体系下不适用，c_pay_to_staff 不可用。")
             lines.append("")
 
-        lines.append("### 13.2 Agent WebSearch 补充")
+        lines.append("### 13.2 Agent 补充")
         lines.append("")
-        lines.append("*[§13.2 待Agent WebSearch补充]*")
+        lines.append("*[§13.2 待Agent补充]*")
         lines.append("")
 
         lines.append("---")

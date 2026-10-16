@@ -1,0 +1,63 @@
+{
+  "_comment": [
+    "brief.json 空模板 —— 只覆盖你写了的字段，其余仍走自动抽取。",
+    "把本文件拷到个股产物目录（output/{code}_{company}/brief.json）再删掉不需要的键。",
+    "tone 取值：negative（陶土色）/ positive（绿）/ neutral（墨色）/ amber（琥珀）。"
+  ],
+
+  "framework": "龟龟投资策略",
+  "title": "公司简称",
+  "code": "00000.HK",
+  "subtitle_kind": "投资分析",
+  "meta": "数据截止 FY2025 年报 ｜ 最新股价 0.00 港元 ｜ 分析日期 2026-01-01",
+
+  "verdict_word": "不建仓",
+  "verdict_tone": "negative",
+  "verdict_line": "一句话说清最终判断及其依据。",
+  "verdict_kv": [
+    { "label": "目标买入价", "value": "0.00 港元", "note": "悲观档唯一买点" },
+    { "label": "最新股价", "value": "0.00 港元", "note": "高于买点即不构成买点" },
+    { "label": "安全边际 KK", "value": "-0.00 pct", "note": "GG_pess - II" }
+  ],
+
+  "kpis": [
+    { "label": "穿透回报率 · 决策口径", "value": "0.00%", "note": "低于门槛", "tone": "negative" },
+    { "label": "门槛值 II", "value": "5.00%", "note": "max(5%, Rf + 3%)", "tone": "neutral" }
+  ],
+
+  "notes": [
+    { "label": "最大优势", "text": "……", "tone": "green" },
+    { "label": "最大风险", "text": "……", "tone": "clay" }
+  ],
+
+  "dimensions": [
+    { "id": "D1", "name": "商业模式与资本特征", "headline": "……", "confidence": "中", "status": "充分" },
+    { "id": "D2", "name": "竞争优势与护城河", "headline": "……", "confidence": "低", "status": "不足" }
+  ],
+
+  "table": {
+    "columns": ["参数 / 指标", "取值"],
+    "rows": [
+      ["Owner Earnings", "0.00 百万元"],
+      ["门槛值 II", "5.00%"]
+    ]
+  },
+
+  "thesis": {
+    "core": "核心论点一段话。",
+    "bullets": ["多头逻辑一", "多头逻辑二"]
+  },
+
+  "risks": ["风险或待验证事项一", "风险或待验证事项二"],
+
+  "limits": ["必须随文披露的口径缺口一"],
+
+  "gates": [
+    { "label": "机构不变量", "value": "0 / 0 PASS", "note": "……", "tone": "green" }
+  ],
+
+  "footer": {
+    "tags": ["Tushare Pro", "claim 绑定"],
+    "lines": ["数据来源：……"]
+  }
+}

@@ -21,6 +21,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from config import get_token
@@ -86,6 +87,21 @@ from cache_utils import ScreenerCache
 # ============================================================
 
 
+def _is_missing_number(value: Any) -> bool:
+    """True when a numeric metric is absent (None/NaN/NA/non-numeric).
+
+    Used by the data-completeness policy (方案 1-B): a missing metric must be
+    distinguishable from a genuinely measured one so that it can be flagged
+    instead of being silently ranked.
+    """
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return True
+
+
 class TushareScreener:
     """Main screener class: Tier 1 bulk screening + Tier 2 deep analysis."""
 
@@ -98,11 +114,15 @@ class TushareScreener:
         self._stock_data_cache: dict[str, pd.DataFrame] = {}  # per-stock in-memory cache
 
     def _get_pro(self):
-        """Lazy-initialize Tushare pro API."""
+        """Lazy-initialize Tushare pro API.
+
+        The token is passed to ``pro_api`` instead of ``ts.set_token`` because
+        the latter writes ``~/tk.csv`` outside the workspace, which the DSH
+        default sandbox denies.
+        """
         if self._pro is None:
             import tushare as ts
-            ts.set_token(self._token)
-            self._pro = ts.pro_api(timeout=30)
+            self._pro = ts.pro_api(token=self._token, timeout=30)
             api_url = os.environ.get("TUSHARE_API_URL", "")
             if api_url:
                 self._pro._DataApi__http_url = api_url
@@ -126,7 +146,7 @@ class TushareScreener:
                 last_err = e
                 if attempt < 3:
                     import tushare as ts
-                    self._pro = ts.pro_api(timeout=30)
+                    self._pro = ts.pro_api(token=self._token, timeout=30)
                     api_url = os.environ.get("TUSHARE_API_URL", "")
                     if api_url:
                         self._pro._DataApi__http_url = api_url
@@ -438,6 +458,18 @@ class TushareScreener:
         metrics["gross_margin"] = float(gm) if gm is not None and gm == gm else None
         metrics["debt_to_assets"] = float(debt) if debt is not None and debt == debt else None
         metrics["profit_dedt"] = float(profit_dedt) if profit_dedt is not None and profit_dedt == profit_dedt else None
+
+        # 方案 1-B: a missing gate field must not silently count as "pass".
+        # These stocks are not vetoed, but they are flagged data_incomplete and
+        # excluded from the main ranking (listed separately by run()/main()).
+        metrics["missing_gate_fields"] = [
+            label for label, key in (
+                ("roe_waa", "roe_waa"),
+                ("grossprofit_margin", "gross_margin"),
+                ("debt_to_assets", "debt_to_assets"),
+            )
+            if metrics.get(key) is None
+        ]
 
         # Observation channel: FCF-based quality gates
         if channel == "observation":
@@ -784,7 +816,8 @@ class TushareScreener:
                 equity = (_sf(latest.get("total_hldr_eqy_exc_min_int")) or 0) / 1e6
 
                 ibd = 0.0
-                for c in ["st_borr", "lt_borr", "bond_payable", "non_cur_liab_due_1y"]:
+                for c in ["st_borr", "lt_borr", "bond_payable", "non_cur_liab_due_1y",
+                                "lease_liab", "lease_liab_noncur"]:
                     v = _sf(latest.get(c))
                     if v:
                         ibd += v / 1e6
@@ -923,7 +956,8 @@ class TushareScreener:
                 cash = _sf(latest.get("money_cap")) or 0
                 trad = _sf(latest.get("trad_asset")) or 0
                 ibd = 0.0
-                for c in ["st_borr", "lt_borr", "bond_payable", "non_cur_liab_due_1y"]:
+                for c in ["st_borr", "lt_borr", "bond_payable", "non_cur_liab_due_1y",
+                                "lease_liab", "lease_liab_noncur"]:
                     v = _sf(latest.get(c))
                     if v:
                         ibd += v
@@ -1047,44 +1081,122 @@ class TushareScreener:
         result["floor_baseline"] = fp.get("composite_baseline")
         result["floor_premium"] = fp.get("premium")
 
+        # Step 6: data-completeness flags (方案 1-B). Missing data is neither
+        # vetoed nor silently scored: it is marked and listed separately.
+        gate_missing = list(result.get("missing_gate_fields") or [])
+        missing_dims = [
+            col for col, _weight_attr, _inverse in self._SCORE_DIMS
+            if _is_missing_number(result.get(col))
+        ]
+        reasons = []
+        if gate_missing:
+            reasons.append("质量门字段缺失: " + "/".join(gate_missing))
+        if missing_dims:
+            reasons.append("评分维度缺失: " + "/".join(missing_dims))
+        result["missing_gate_fields_count"] = len(gate_missing)
+        result["score_coverage"] = len(self._SCORE_DIMS) - len(missing_dims)
+        result["data_incomplete"] = bool(reasons)
+        result["incomplete_reasons"] = "; ".join(reasons)
+
         self._clear_stock_cache(ts_code)
         return result
 
     # ---- Scoring ----
 
+    # Scoring dimensions: (column, config weight attribute, higher_is_better)
+    _SCORE_DIMS: tuple[tuple[str, str, bool], ...] = (
+        ("roe_waa", "weight_roe", False),
+        ("fcf_yield", "weight_fcf_yield", False),
+        ("R", "weight_penetration_r", False),
+        ("ev_ebitda", "weight_ev_ebitda", True),
+        ("floor_premium", "weight_floor_premium", True),
+    )
+
     def _compute_rankings(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Compute composite score based on percentile rankings across 5 dimensions."""
+        """Compute composite score based on percentile rankings across 5 dimensions.
+
+        Missing-value policy (方案 1-B):
+        - NaN never participates in the percentile computation and never
+          receives a rank. (Previously ``na_option="bottom"`` for higher-is-
+          better and ``1 - rank(na_option="top")`` for lower-is-better both
+          handed NaN the TOP percentile, so a stock with missing metrics could
+          outrank every fully-measured stock.)
+        - Weights are renormalised per row over the dimensions actually present.
+        - ``rank_eligible`` requires at least ``min_score_coverage`` scored
+          dimensions (capped at the number of active dimensions) and no missing
+          financial-quality gate field. Ineligible rows are kept in the frame,
+          flagged ``data_incomplete``, and sorted after the eligible ones so
+          callers can list them separately instead of ranking or dropping them.
+        """
         if df.empty:
             return df
 
         cfg = self.config
         df = df.copy()
 
-        # Percentile rank for each dimension
-        # Higher is better: ROE, FCF yield, penetration R
-        for col in ["roe_waa", "fcf_yield", "R"]:
-            if col in df.columns:
-                df[f"{col}_pctile"] = df[col].rank(pct=True, na_option="bottom")
-            else:
-                df[f"{col}_pctile"] = 0.0
+        dims = [(col, float(getattr(cfg, weight_attr)), inverse)
+                for col, weight_attr, inverse in self._SCORE_DIMS
+                if col in df.columns and float(getattr(cfg, weight_attr)) > 0]
 
-        # Lower is better: EV/EBITDA, floor premium
-        for col in ["ev_ebitda", "floor_premium"]:
-            if col in df.columns:
-                df[f"{col}_pctile"] = 1.0 - df[col].rank(pct=True, na_option="top")
-            else:
-                df[f"{col}_pctile"] = 0.0
+        # Percentile ranks, NaN preserved (pandas default na_option="keep")
+        weighted_sum = pd.Series(0.0, index=df.index, dtype=float)
+        weight_sum = pd.Series(0.0, index=df.index, dtype=float)
+        coverage = pd.Series(0, index=df.index, dtype=int)
 
-        # Composite score
-        df["composite_score"] = (
-            cfg.weight_roe * df["roe_waa_pctile"] +
-            cfg.weight_fcf_yield * df["fcf_yield_pctile"] +
-            cfg.weight_penetration_r * df["R_pctile"] +
-            cfg.weight_ev_ebitda * df["ev_ebitda_pctile"] +
-            cfg.weight_floor_premium * df["floor_premium_pctile"]
+        for col, weight, inverse in dims:
+            pct = 1.0 - df[col].rank(pct=True) if inverse else df[col].rank(pct=True)
+            df[f"{col}_pctile"] = pct
+            valid = pct.notna()
+            weighted_sum = weighted_sum.add((pct * weight).where(valid, 0.0), fill_value=0.0)
+            weight_sum = weight_sum.add(
+                pd.Series(weight, index=df.index, dtype=float).where(valid, 0.0),
+                fill_value=0.0,
+            )
+            coverage = coverage.add(valid.astype(int), fill_value=0)
+
+        # Renormalise over available dimensions; NaN when nothing is available
+        ws = weight_sum.to_numpy(dtype=float)
+        comp = np.where(ws > 0, weighted_sum.to_numpy(dtype=float) / np.where(ws > 0, ws, 1.0), np.nan)
+        df["composite_score"] = comp
+        df["score_coverage"] = coverage.astype(int)
+
+        # Eligibility: coverage threshold (capped at active dims) + gate fields present
+        active_dims = max(len(dims), 1)
+        min_cov = min(int(getattr(cfg, "min_score_coverage", 4)), active_dims)
+        # roe_waa doubles as a hard quality-gate field, so it is checked here too
+        # (keeps a direct _compute_rankings call consistent with the pipeline,
+        # which also reports gate gaps via missing_gate_fields_count).
+        gate_ok = pd.Series(True, index=df.index)
+        if "roe_waa" in df.columns:
+            gate_ok &= df["roe_waa"].notna()
+        if "missing_gate_fields_count" in df.columns:
+            gate_ok &= df["missing_gate_fields_count"].fillna(0).astype(int).eq(0)
+        df["rank_eligible"] = (
+            (df["score_coverage"] >= min_cov) & gate_ok & df["composite_score"].notna()
         )
 
-        df = df.sort_values("composite_score", ascending=False)
+        # data_incomplete = any metric genuinely missing (not merely "excluded"),
+        # so the flag stays consistent whether the frame came from the pipeline
+        # (which sets it in _analyze_single_stock) or from a direct call.
+        has_missing_metric = (df["score_coverage"] < active_dims) | ~gate_ok
+        if "data_incomplete" in df.columns:
+            df["data_incomplete"] = (
+                df["data_incomplete"].fillna(False).astype(bool)
+                | has_missing_metric
+                | ~df["rank_eligible"]
+            )
+        else:
+            df["data_incomplete"] = has_missing_metric | ~df["rank_eligible"]
+
+        # 1-B "不给分": an ineligible row keeps its percentile columns for
+        # diagnostics but must not expose a composite score that could be read
+        # as a rankable score (e.g. in the exported CSV).
+        df.loc[~df["rank_eligible"], "composite_score"] = np.nan
+
+        # Eligible first (by score), ineligible after (also by score, NaN last)
+        df = df.sort_values(
+            ["rank_eligible", "composite_score"], ascending=[False, False]
+        ).reset_index(drop=True)
         return df
 
     # ---- Pipeline ----
@@ -1150,7 +1262,20 @@ class TushareScreener:
         # Compute rankings
         result_df = self._compute_rankings(result_df)
 
-        print(f"\n=== Results: {len(result_df)} stocks passed ===")
+        # 方案 1-B: report data-incomplete stocks separately (never silently
+        # ranked, never silently dropped)
+        if "rank_eligible" in result_df.columns:
+            excluded = result_df[~result_df["rank_eligible"].astype(bool)]
+            if not excluded.empty:
+                print(f"\n⚠️  {len(excluded)} 只股票数据不足，未参与排名"
+                      f"（缺失值不再计为最优）:")
+                for _, r in excluded.iterrows():
+                    print(f"    {r['ts_code']} {r.get('name', '')}: "
+                          f"{r.get('incomplete_reasons', '') or '数据不足'}")
+
+        eligible_n = int(result_df["rank_eligible"].sum()) if "rank_eligible" in result_df.columns else len(result_df)
+        print(f"\n=== Results: {len(result_df)} stocks passed "
+              f"({eligible_n} rank-eligible, {len(result_df) - eligible_n} data-incomplete) ===")
         return result_df
 
     # ---- Export ----
@@ -1169,7 +1294,8 @@ class TushareScreener:
         display_cols = [c for c in [
             "ts_code", "name", "industry", "close", "pe_ttm", "pb", "dv_ttm",
             "roe_waa", "gross_margin", "fcf_yield", "fcf_margin", "R",
-            "ev_ebitda", "floor_premium", "composite_score"
+            "ev_ebitda", "floor_premium", "composite_score",
+            "score_coverage", "data_incomplete", "incomplete_reasons",
         ] if c in df.columns]
 
         display_df = df[display_cols].copy()

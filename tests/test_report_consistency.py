@@ -1,11 +1,15 @@
 """Tests for scripts/report_consistency.py — 杠杆6 cross-passage audit + 杠杆7 gates."""
 
 import os
+import pathlib
+import sys
 
 import pytest
 
 import report_consistency as rc
 from report_consistency import extract, find_conflicts, check_gates, main
+
+SCRIPTS = pathlib.Path(__file__).resolve().parent.parent / "scripts"
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures",
                        "sample_report_with_conflicts.md")
@@ -103,11 +107,21 @@ class TestGates:
 # ── CLI ─────────────────────────────────────────────────────────────
 
 class TestCLI:
-    def test_main_conflicts_exit_1(self, tmp_path):
+    def test_main_conflicts_are_advisory_exit_0(self, tmp_path):
+        """2026-10-14 语义变更：advisory 冲突**不**计入交付退出码（默认）。"""
         out = tmp_path / "cons.md"
         rc_code = main(["--report", FIXTURE, "--output", str(out)])
-        assert rc_code == 1
+        assert rc_code == 0
         assert out.exists()
+        # 冲突清单仍必须被渲染出来，否则信号会静默消失
+        assert "冲突" in out.read_text(encoding="utf-8")
+
+    def test_conflicts_are_failures_flag_restores_exit_1(self, tmp_path):
+        """逃生口：需要旧语义时可显式恢复。"""
+        out = tmp_path / "cons.md"
+        rc_code = main(["--report", FIXTURE, "--output", str(out),
+                        "--conflicts-are-failures"])
+        assert rc_code == 1
 
     def test_main_missing_file_exit_2(self, tmp_path):
         rc_code = main(["--report", str(tmp_path / "nope.md")])
@@ -125,3 +139,85 @@ class TestCLI:
         rc_code = main(["--report", FIXTURE, "--output", str(out), "--gates"])
         assert rc_code == 1
         assert "硬门槛" in out.read_text(encoding="utf-8")
+
+
+# ===== §17 claim verification (--claims · known_issues.md P2-20 改动 2) =====
+
+
+class TestClaimGate:
+    """`--claims` must mechanically verify claim-bound tokens, fail-closed."""
+
+    def _ledger_file(self, tmp_path):
+        import json
+        payload = {
+            "schema_version": "1.0", "stock_code": "600887.SH",
+            "claims": [
+                {"claim_id": "cm17.11.aa2y.m3.gg", "indicator": "GG",
+                 "value": 2.89, "unit": "%", "time": "2024",
+                 "basis": "AA_2y=8710", "policy": "round:2", "section": "17.11"},
+            ],
+        }
+        path = tmp_path / "claims.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def test_valid_token_passes(self, tmp_path):
+        from report_consistency import check_claims
+        report = '穿透回报率 <claim id="cm17.11.aa2y.m3.gg">2.89%</claim>'
+        result = check_claims(report, str(self._ledger_file(tmp_path)))
+        assert result["tokens"] == 1
+        assert result["failed"] == []
+
+    def test_tampered_value_fails(self, tmp_path):
+        from report_consistency import check_claims
+        report = '穿透回报率 <claim id="cm17.11.aa2y.m3.gg">7.20%</claim>'
+        result = check_claims(report, str(self._ledger_file(tmp_path)))
+        assert len(result["failed"]) == 1
+
+    def test_unknown_claim_id_fails(self, tmp_path):
+        from report_consistency import check_claims
+        report = '<claim id="cm17.99.nope">1.00%</claim>'
+        result = check_claims(report, str(self._ledger_file(tmp_path)))
+        assert len(result["failed"]) == 1
+
+    def test_missing_ledger_returns_none(self, tmp_path):
+        from report_consistency import check_claims
+        assert check_claims("x", str(tmp_path / "nope.json")) is None
+
+    def test_render_flags_bare_numbers(self, tmp_path):
+        from report_consistency import check_claims, render_claims
+        result = check_claims("全是裸数字 1.0 2.0", str(self._ledger_file(tmp_path)))
+        out = render_claims(result)
+        assert "没有任何" in out
+        assert "默认不可信" in out
+
+    def test_render_lists_failures(self, tmp_path):
+        from report_consistency import check_claims, render_claims
+        report = '<claim id="cm17.11.aa2y.m3.gg">7.20%</claim>'
+        out = render_claims(check_claims(report, str(self._ledger_file(tmp_path))))
+        assert "未能通过机械校验" in out
+        assert "cm17.11.aa2y.m3.gg" in out
+
+    def test_cli_exit_code_is_1_on_claim_failure(self, tmp_path):
+        import subprocess
+        ledger = self._ledger_file(tmp_path)
+        report = tmp_path / "r.md"
+        report.write_text('<claim id="cm17.11.aa2y.m3.gg">7.20%</claim>\n'
+                          "## 七、风险\n内容足够长以通过字数门槛检查，重复若干次。"
+                          "内容足够长以通过字数门槛检查，重复若干次。\n",
+                          encoding="utf-8")
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPTS / "report_consistency.py"),
+             "--report", str(report), "--claims", str(ledger), "--gates"],
+            capture_output=True, text=True)
+        assert proc.returncode == 1
+        assert "声明校验失败" in proc.stderr
+
+    def test_cli_requires_gates(self, tmp_path):
+        import subprocess
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPTS / "report_consistency.py"),
+             "--report", __file__, "--claims", str(self._ledger_file(tmp_path))],
+            capture_output=True, text=True)
+        assert proc.returncode == 2
+        assert "--gates" in proc.stderr

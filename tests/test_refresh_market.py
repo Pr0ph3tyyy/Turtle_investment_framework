@@ -130,11 +130,11 @@ def _build_minimal_datapack(timestamp=None, ts_code="600887.SH", include_parent=
 
 ## 8. 行业与竞争
 
-*[§8 待Agent WebSearch补充]*
+*[§8 待Agent补充]*
 
 ## 10. 管理层讨论与分析 (MD&A)
 
-*[§10 待Agent WebSearch补充]*
+*[§10 待Agent补充]*
 
 ## 17. 衍生指标（Python 预计算）
 
@@ -152,9 +152,9 @@ def _build_minimal_datapack(timestamp=None, ts_code="600887.SH", include_parent=
 
 未检测到异常。
 
-### 13.2 Agent WebSearch 补充
+### 13.2 Agent 补充
 
-*[§13.2 待Agent WebSearch补充]*
+*[§13.2 待Agent补充]*
 
 ---
 *共 14/14 个数据板块成功获取*
@@ -431,7 +431,10 @@ class TestRefreshMarketCLI:
              patch("tushare_collector.get_token", return_value="tok"), \
              patch("tushare_collector.time.sleep"), \
              patch("sys.argv", ["prog", "--code", "600887.SH",
-                                "--refresh-market", "--output", str(output)]):
+                                "--refresh-market", "--output", str(output),
+                                # 本组用例只验证**刷新路由**；最小 mock 包必然
+                                # 缺 §3/§4/§5 ⇒ C1 阻断级 FAIL。门禁语义另有专测。
+                                "--allow-degraded"]):
             mock_ts.pro_api.return_value = MagicMock()
             from tushare_collector import TushareClient, main
 
@@ -452,7 +455,10 @@ class TestRefreshMarketCLI:
              patch("tushare_collector.get_token", return_value="tok"), \
              patch("tushare_collector.time.sleep"), \
              patch("sys.argv", ["prog", "--code", "600887.SH",
-                                "--refresh-market", "--output", str(output)]):
+                                "--refresh-market", "--output", str(output),
+                                # 本组用例只验证**刷新路由**；最小 mock 包必然
+                                # 缺 §3/§4/§5 ⇒ C1 阻断级 FAIL。门禁语义另有专测。
+                                "--allow-degraded"]):
             mock_ts.pro_api.return_value = MagicMock()
             from tushare_collector import TushareClient, main
 
@@ -472,7 +478,10 @@ class TestRefreshMarketCLI:
              patch("tushare_collector.get_token", return_value="tok"), \
              patch("tushare_collector.time.sleep"), \
              patch("sys.argv", ["prog", "--code", "600887.SH",
-                                "--refresh-market", "--output", str(output)]):
+                                "--refresh-market", "--output", str(output),
+                                # 本组用例只验证**刷新路由**；最小 mock 包必然
+                                # 缺 §3/§4/§5 ⇒ C1 阻断级 FAIL。门禁语义另有专测。
+                                "--allow-degraded"]):
             mock_ts.pro_api.return_value = MagicMock()
             from tushare_collector import TushareClient, main
 
@@ -482,3 +491,73 @@ class TestRefreshMarketCLI:
 
             mock_refresh.assert_called_once()
             mock_full.assert_not_called()
+
+
+class TestGateVerdictSemantics:
+    """FAIL 分级 + 退出码语义（2026-10-14 收紧）。
+
+    为什么需要：旧实现只 print 警告，`main()` 结尾没有 `sys.exit` ⇒ **永远退出 0**。
+    实测：invariants FAIL 3 + field_coverage FAIL 1 的产物照样交付。
+    """
+
+    def _run(self, tmp_path, extra):
+        output = tmp_path / "data_pack_market.md"
+        output.write_text(_build_minimal_datapack(), encoding="utf-8")
+        with patch("tushare_collector.ts") as mock_ts, \
+             patch("tushare_collector.get_token", return_value="tok"), \
+             patch("tushare_collector.time.sleep"), \
+             patch("sys.argv", ["prog", "--code", "600887.SH",
+                                "--refresh-market", "--output", str(output)] + extra):
+            mock_ts.pro_api.return_value = MagicMock()
+            from tushare_collector import TushareClient, main
+            with patch.object(TushareClient, "refresh_market_sections",
+                              return_value="refreshed"), \
+                 patch.object(TushareClient, "assemble_data_pack"):
+                main()
+        return output
+
+    def test_blocking_failure_exits_nonzero_by_default(self, tmp_path):
+        """最小包缺 §3/§4/§5 ⇒ C1 阻断级 FAIL ⇒ fail-closed（SystemExit 1）。"""
+        with pytest.raises(SystemExit) as exc:
+            self._run(tmp_path, [])
+        assert exc.value.code == 1
+
+    def test_allow_degraded_stamps_the_pack(self, tmp_path):
+        """--allow-degraded ⇒ 退出 0，但 gate_status.json 必须留下 degraded=true。"""
+        output = self._run(tmp_path, ["--allow-degraded"])
+        import json
+        gs = json.loads((output.parent / "gate_status.json").read_text(encoding="utf-8"))
+        assert gs["degraded"] is True
+        assert gs["deliverable"] is True
+        assert gs["blocking"], "降级不等于没有失败 —— 必须留下清单"
+        assert gs["policy"]["overridden_by"] == "--allow-degraded"
+
+    def test_disclosure_only_does_not_block(self, tmp_path):
+        """披露级（UNEVALUATED/WARN）不阻断 —— 分级的意义就在这里。"""
+        from tushare_collector import _gate_verdict
+
+        class _F:
+            def __init__(self, code, status, title="t", detail="d"):
+                self.code, self.status, self.title, self.detail = code, status, title, detail
+
+        class _C:
+            stock_code = "600887.SH"
+
+        v = _gate_verdict(_C(), [_F("I5", "FAIL"), _F("I3", "UNEVALUATED")], [], [],
+                          allow_degraded=False)
+        assert v["deliverable"] is True and not v["blocking"]
+        assert v["disclosure_count"] == 2
+
+    def test_blocking_code_is_blocking(self, tmp_path):
+        from tushare_collector import _gate_verdict
+
+        class _F:
+            def __init__(self, code, status):
+                self.code, self.status, self.title, self.detail = code, status, "t", "d"
+
+        class _C:
+            stock_code = "600887.SH"
+
+        v = _gate_verdict(_C(), [_F("I4", "FAIL")], [], [], allow_degraded=False)
+        assert v["deliverable"] is False
+        assert v["blocking"][0]["why"], "阻断项必须说明为什么它阻断"

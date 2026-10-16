@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pandas as pd
 import pytest
+import sys
 
 from tushare_collector import TushareClient, WarningsCollector, rate_limit
 
@@ -53,11 +54,17 @@ class TestRateLimit:
 
 class TestTushareClientInit:
     @patch("tushare_collector.ts")
-    def test_init_sets_token(self, mock_ts):
+    def test_init_passes_token_without_writing_home_file(self, mock_ts):
+        """The token must go to pro_api(), never to set_token().
+
+        ``ts.set_token`` writes ``~/tk.csv``; under the DSH default sandbox
+        (workspace-write) that raises PermissionError, so the collector must
+        not depend on it.
+        """
         mock_ts.pro_api.return_value = MagicMock()
         client = TushareClient("test_token")
-        mock_ts.set_token.assert_called_once_with("test_token")
-        mock_ts.pro_api.assert_called_once_with(timeout=30)
+        mock_ts.set_token.assert_not_called()
+        mock_ts.pro_api.assert_called_once_with(token="test_token", timeout=30)
         assert client.token == "test_token"
 
 
@@ -281,6 +288,8 @@ class TestSafeCall:
         assert result.equals(expected_df)
         # pro_api called twice: once in __init__, once for reconnect
         assert mock_ts.pro_api.call_count == 2
+        # the reconnect must carry the token too (no ~/tk.csv fallback exists)
+        mock_ts.pro_api.assert_called_with(token="token", timeout=30)
         mock_pro_old.cashflow.assert_called_once()
         mock_pro_new.cashflow.assert_called_once()
 
@@ -619,7 +628,7 @@ class TestAssembleDataPack:
         assert "8. 行业与竞争" in result
         assert "10. 管理层讨论与分析" in result
         assert "13. 风险警示" in result
-        assert "Agent WebSearch" in result
+        assert "Agent 补充" in result
 
 
 # --- Feature #30: WarningsCollector ---
@@ -1318,10 +1327,10 @@ class TestAssembleDataPackWarnings:
         assert "13.1 脚本自动检测" in result
 
     def test_section_13_has_agent_supplement_placeholder(self):
-        """§13 output must contain '13.2 Agent WebSearch'."""
+        """§13 output must contain '13.2 Agent 补充'."""
         result = self._assemble_with_mock()
-        assert "13.2 Agent WebSearch" in result
-        assert "§13.2 待Agent WebSearch补充" in result
+        assert "13.2 Agent 补充" in result
+        assert "§13.2 待Agent补充" in result
 
     def test_empty_data_triggers_missing_warnings(self):
         """Empty DataFrames should trigger DATA_MISSING warnings."""
@@ -1453,11 +1462,20 @@ class TestYfinanceFallback:
         """00696.HK → 0696.HK for Yahoo Finance."""
         assert TushareClient._yf_ticker("00696.HK") == "0696.HK"
 
-    def test_fallback_skipped_when_unavailable(self):
-        """When yfinance is not installed, fallback returns None."""
+    def test_fallback_uses_chart_endpoint_not_the_yfinance_gate(self):
+        """回退走 Yahoo **chart** 端点（requests），不再受 `_yf_available` 门控。
+
+        旧实现依赖 `Ticker.info`（quoteSummary 现返回 401）并按 `_yf_available` 门控，
+        导致"yfinance 不可用 ⇒ 无回退价"；现在 chart 端点只需 requests，失败时返回 None。
+        """
+        import pandas as _pd
         client = _make_client()
         client._yf_available = False
-        assert client._yf_fallback_price("600887.SH") is None
+        with patch.object(client, "_yahoo_chart_df", return_value=_pd.DataFrame()):
+            assert client._yf_fallback_price("600887.SH") is None
+        with patch.object(client, "_yahoo_chart_df", return_value=_pd.DataFrame({"close": [30.5]})):
+            out = client._yf_fallback_price("600887.SH")
+        assert out and out["close"] == 30.5
 
     def test_fallback_triggers_on_tushare_failure(self):
         """When Tushare section fails and yfinance available, fallback data is used."""
@@ -1579,8 +1597,9 @@ class TestHKCurrencyAnnotation:
         with patch.object(client, '_safe_call', side_effect=mock_safe_call):
             result = client.assemble_data_pack("00700.HK")
 
-        assert "报表币种: HKD" in result
-        assert "百万港元" in result
+        assert "交易币种: HKD" in result
+        assert "报表币种: **未确认**" in result
+        assert "百万·币种未确认" in result   # 报表币种未确认，不猜港元
 
     def test_a_share_no_hkd_annotation(self):
         """A-share data pack does NOT include HKD annotation."""
@@ -1775,6 +1794,215 @@ class TestHKPivot:
         result = TushareClient._pivot_hk_line_items(df, HK_INCOME_MAP)
         assert result.empty
 
+    # --- Multi-source specs (added 2026-10-13, see known_issues.md A1/A2) ---
+
+    def test_capex_sums_ppe_and_intangibles(self):
+        """HK CapEx = 购建固定资产 + 购建无形资产及其他资产.
+
+        Regression: only the intangible line was mapped, which understated CapEx
+        by 1.5–130x on real issuers (06862 / 00506 / 06049). Real values for
+        06862 FY2025: 1,672.56 + 75.82 = 1,748.38 (百万).
+        """
+        from tushare_collector import HK_CASHFLOW_MAP
+        df = pd.DataFrame([
+            {"ts_code": "06862.HK", "end_date": "20251231",
+             "ind_name": "购建固定资产", "ind_value": 1672560000},
+            {"ts_code": "06862.HK", "end_date": "20251231",
+             "ind_name": "购建无形资产及其他资产", "ind_value": 75820000},
+        ])
+        result = TushareClient._pivot_hk_line_items(df, HK_CASHFLOW_MAP)
+        assert result.iloc[0]["c_pay_acq_const_fiolta"] == 1672560000 + 75820000
+
+    def test_capex_present_when_only_ppe(self):
+        """06049 保利物业 has NO 购建无形资产及其他资产 — CapEx must still resolve.
+
+        Before the fix this issuer produced CapEx = 0 for every year.
+        """
+        from tushare_collector import HK_CASHFLOW_MAP
+        df = pd.DataFrame([
+            {"ts_code": "06049.HK", "end_date": "20251231",
+             "ind_name": "购建固定资产", "ind_value": 44979000},
+        ])
+        result = TushareClient._pivot_hk_line_items(df, HK_CASHFLOW_MAP)
+        assert result.iloc[0]["c_pay_acq_const_fiolta"] == 44979000
+
+    def test_dna_resolves_from_prefixed_ind_name(self):
+        """D&A is exposed as '加:折旧及摊销'; the bare name must NOT map."""
+        from tushare_collector import HK_CASHFLOW_MAP
+        df = pd.DataFrame([
+            {"ts_code": "06862.HK", "end_date": "20251231",
+             "ind_name": "加:折旧及摊销", "ind_value": 2198379000},
+            {"ts_code": "06862.HK", "end_date": "20241231",
+             "ind_name": "折旧及摊销", "ind_value": 999},
+        ])
+        result = TushareClient._pivot_hk_line_items(df, HK_CASHFLOW_MAP)
+        row = result[result["end_date"] == "20251231"].iloc[0]
+        assert row["depr_fa_coga_dpba"] == 2198379000
+        # the unmapped bare-name row must not leak in as its own period
+        assert set(result["end_date"]) == {"20251231"}
+
+    def test_first_mode_duplicates_are_not_summed(self):
+        """Only 'sum'-mode fields aggregate; others keep 'first' semantics."""
+        from tushare_collector import HK_CASHFLOW_MAP
+        df = pd.DataFrame([
+            {"ts_code": "00700.HK", "end_date": "20241231",
+             "ind_name": "经营业务现金净额", "ind_value": 100},
+            {"ts_code": "00700.HK", "end_date": "20241231",
+             "ind_name": "经营业务现金净额", "ind_value": 200},
+        ])
+        result = TushareClient._pivot_hk_line_items(df, HK_CASHFLOW_MAP)
+        assert result.iloc[0]["n_cashflow_act"] == 100
+
+
+class TestFieldSpec:
+    """Test constants.field_names / field_mode (multi-source map specs)."""
+
+    def test_plain_string_keeps_first_mode(self):
+        from tushare_collector import field_names, field_mode
+        assert field_names("营业额") == ["营业额"]
+        assert field_mode("营业额") == "first"
+
+    def test_spec_dict_sum_mode(self):
+        from tushare_collector import field_names, field_mode
+        spec = {"names": ["购建固定资产", "购建无形资产及其他资产"], "mode": "sum"}
+        assert field_names(spec) == ["购建固定资产", "购建无形资产及其他资产"]
+        assert field_mode(spec) == "sum"
+
+    def test_spec_dict_defaults_to_first(self):
+        from tushare_collector import field_mode
+        assert field_mode({"names": ["a"]}) == "first"
+
+    def test_unknown_mode_falls_back_to_first(self):
+        from tushare_collector import field_mode
+        assert field_mode({"names": ["a"], "mode": "bogus"}) == "first"
+
+    def test_empty_specs(self):
+        from tushare_collector import field_names
+        assert field_names(None) == []
+        assert field_names({}) == []
+        assert field_names([]) == []
+
+    def test_hk_cashflow_map_shape(self):
+        """Guard the two field-mapping fixes against silent regression."""
+        from tushare_collector import HK_CASHFLOW_MAP, HK_INCOME_MAP, field_names, field_mode
+        capex = HK_CASHFLOW_MAP["c_pay_acq_const_fiolta"]
+        assert field_mode(capex) == "sum"
+        assert set(field_names(capex)) == {"购建固定资产", "购建无形资产及其他资产"}
+        # D&A must carry the indirect-method prefix
+        assert HK_CASHFLOW_MAP["depr_fa_coga_dpba"] == "加:折旧及摊销"
+        # HK staff cost comes from the income statement, not the cashflow statement
+        assert HK_INCOME_MAP["c_pay_to_staff"] == "薪金福利支出"
+
+
+class TestHKMarketCapUnit:
+    """HK total_market_cap is in RAW currency units, not millions (P0-3).
+
+    Verified 2026-10 on 10/10 HK tickers: 00700 = 3,862,538,856,756 (HK$3.86tn),
+    06862 = 53,343,180,000 (HK$53.3bn). The old code multiplied by 1e6, which
+    zeroed out §17.11's GG and target buy price for HK listings.
+    """
+
+    @staticmethod
+    def _client_with(cap, close=11.69):
+        client = _make_client()
+        client._store["basic_info"] = pd.DataFrame([{
+            "ts_code": "06862.HK", "end_date": "20251231",
+            "total_market_cap": cap, "close": close,
+        }])
+        return client
+
+    def _row(self, client):
+        return client._store["basic_info"].iloc[0]
+
+    def test_raw_value_passes_through_unchanged(self):
+        client = self._client_with(53_343_180_000.0)
+        assert client._hk_market_cap_raw(self._row(client)) == 53_343_180_000.0
+        assert not client._store.get("_hk_mktcap_warnings")
+
+    def test_millions_value_is_normalised_and_flagged(self):
+        """A sub-floor value means the legacy 'millions' shape → ×1e6 + warning."""
+        client = self._client_with(65_160.06)
+        assert client._hk_market_cap_raw(self._row(client)) == 65_160.06e6
+        assert client._store["_hk_mktcap_warnings"]
+
+    def test_missing_or_nonpositive_returns_none(self):
+        for bad in (None, 0.0, -1.0):
+            client = self._client_with(bad)
+            assert client._hk_market_cap_raw(self._row(client)) is None
+
+    def test_share_count_matches_annual_report(self):
+        """06862 issued shares = 5,574,000,000 (2025 annual report).
+
+        cap / close must reproduce it exactly — this is the self-check that the
+        magnitude is right.
+        """
+        client = self._client_with(65_160_060_000.0, close=11.69)
+        got = client._get_mktcap_shares("06862.HK")
+        assert got is not None
+        mkt_cap, shares, _close = got
+        assert mkt_cap == 65_160_060_000.0
+        assert round(shares / 1e6) == 5574.0
+
+    def test_mktcap_available_without_close_price(self):
+        """Market cap must NOT require a close price (live finding 2026-10-13).
+
+        When `hk_daily`'s quota is exhausted, `close` is missing but
+        `total_market_cap` is still present. The old code returned None on a
+        missing close, which killed §17.11/§17.13/§17.14 entirely even though
+        GG/R only need the market cap; only the target price needs the price.
+        """
+        client = self._client_with(65_160_060_000.0, close=None)
+        ms = client._get_mktcap_shares("06862.HK")
+        assert ms is not None
+        mkt_cap, total_shares, close = ms
+        assert mkt_cap > 0
+        assert total_shares is None       # cannot be derived without the price
+        assert close is None
+
+    def test_mktcap_shares_degrades_without_cap(self):
+        """Missing cap → None → §17.11 degrades instead of emitting ~0 values."""
+        client = self._client_with(None)
+        assert client._get_mktcap_shares("06862.HK") is None
+
+    # --- FX: trading → reporting currency (known_issues.md P0-2) ---
+
+    def test_fx_is_identity_for_a_shares(self):
+        client = _make_client()
+        assert client._fx_to_reporting("600941.SH") == 1.0
+        assert not client._store.get("_fx_warnings")
+
+    def test_fx_converts_market_cap_but_not_share_count(self):
+        """06862 trades in HKD but reports in CNY: only the denominator converts."""
+        client = self._client_with(65_160_060_000.0, close=11.69)
+        client._store["fx"] = {"factor_to_reporting": 0.86466}
+        mkt_cap, shares, _close = client._get_mktcap_shares("06862.HK")
+        assert round(mkt_cap) == round(65_160_060_000.0 * 0.86466)
+        # shares must stay consistent with the trading-currency cap and price
+        assert round(shares / 1e6) == 5574.0
+        assert not client._store.get("_fx_warnings")
+
+    def test_fx_missing_degrades_with_visible_warning(self):
+        """No rate → unconverted, but the omission must be visible, not silent."""
+        client = self._client_with(65_160_060_000.0, close=11.69)
+        mkt_cap, _shares, _close = client._get_mktcap_shares("06862.HK")
+        assert mkt_cap == 65_160_060_000.0  # unconverted
+        assert client._store["_fx_warnings"]
+        assert "P0-2" in client._store["_fx_warnings"][0]
+
+    def test_fx_raises_the_penetration_return(self):
+        """Converting the denominator must raise GG by 1/0.86466 ≈ 15.7%."""
+        aa = 5_000_000_000.0     # reporting currency
+        cap_hkd = 65_160_060_000.0
+        m = 80.0
+
+        def gg(mkt_cap):
+            return aa * m / 100 / mkt_cap * 100
+
+        unconverted = gg(cap_hkd)
+        converted = gg(cap_hkd * 0.86466)
+        assert converted / unconverted == pytest.approx(1 / 0.86466, rel=1e-9)
+        assert round((converted / unconverted - 1) * 100, 1) == 15.7
+
 
 class TestHKIncome:
     """Test HK income statement (#113)."""
@@ -1784,11 +2012,13 @@ class TestHKIncome:
         mock_df = _load_mock("hk_income_00700.json")
 
         with patch("tushare_collector.time.sleep"):
+            # 真实管线由 _build_header/_detect_currency 先设好交易币种
+            client._currency = "HKD"
             client._safe_call = MagicMock(return_value=mock_df)
             result = client.get_income("00700.HK")
 
         assert "## 3. 合并利润表" in result
-        assert "百万港元" in result
+        assert "百万·币种未确认" in result   # 报表币种未确认，不猜港元
         assert "2024" in result
         assert "2020" in result
         # Check Tencent's 2024 revenue: 660125000000 / 1e6 = 660,125.00
@@ -1819,11 +2049,13 @@ class TestHKBalanceSheet:
         mock_df = _load_mock("hk_balancesheet_00700.json")
 
         with patch("tushare_collector.time.sleep"):
+            # 真实管线由 _build_header/_detect_currency 先设好交易币种
+            client._currency = "HKD"
             client._safe_call = MagicMock(return_value=mock_df)
             result = client.get_balance_sheet("00700.HK")
 
         assert "## 4. 合并资产负债表" in result
-        assert "百万港元" in result
+        assert "百万·币种未确认" in result   # 报表币种未确认，不猜港元
         assert "现金及等价物" in result
         assert "总资产" in result
         assert "股东权益" in result
@@ -1845,11 +2077,13 @@ class TestHKCashflow:
         mock_df = _load_mock("hk_cashflow_00700.json")
 
         with patch("tushare_collector.time.sleep"):
+            # 真实管线由 _build_header/_detect_currency 先设好交易币种
+            client._currency = "HKD"
             client._safe_call = MagicMock(return_value=mock_df)
             result = client.get_cashflow("00700.HK")
 
         assert "## 5. 现金流量表" in result
-        assert "百万港元" in result
+        assert "百万·币种未确认" in result   # 报表币种未确认，不猜港元
         assert "经营业务现金净额" in result
         assert "自由现金流" in result
         assert "c_pay_to_staff 港股不可用" in result
@@ -1914,6 +2148,50 @@ class TestHKDividends:
             result = client.get_dividends("00700.HK")
         assert "暂无分红" in result
 
+    # --- stuck-DPS guard (added 2026-10-13, known_issues.md A7) ---
+
+    def test_stuck_dps_two_distinct_values_triggers_yf_fallback(self):
+        """'Few distinct values recycled across many rows' must be treated as stuck.
+
+        This is the 2026-08 data shape ({0.7220, 1.2290} over 10 rows). The old
+        `len(set(...)) == 1` guard missed it, producing §17.10 法1 payout ratios
+        of 192%–983% for 06862.
+        """
+        client = _make_client()
+        rows = []
+        for year in ("2025", "2024", "2023", "2022", "2021"):
+            for suffix, dps in (("1231", 0.7220), ("0630", 1.2290)):
+                rows.append({"ts_code": "06862.HK", "end_date": f"{year}{suffix}",
+                             "dps_hkd": dps, "divi_ratio": 80.0})
+
+        with patch("tushare_collector.time.sleep"):
+            client._safe_call = MagicMock(return_value=pd.DataFrame(rows))
+            client._get_yf_annual_dividends = MagicMock(
+                return_value={"2025": 0.9, "2024": 0.8, "2023": 0.7,
+                              "2022": 0.6, "2021": 0.5})
+            result = client.get_dividends("06862.HK")
+
+        warning = client._store.get("_dividend_warning")
+        assert warning, "2-distinct-value DPS series should be flagged as stuck"
+        assert "2 个不同值" in warning
+        assert "yfinance" in result
+
+    def test_healthy_dps_series_is_not_flagged(self):
+        """A genuinely varying DPS series must not trigger the fallback."""
+        client = _make_client()
+        rows = [{"ts_code": "00700.HK", "end_date": f"{y}1231",
+                 "dps_hkd": v, "divi_ratio": 20.0}
+                for y, v in (("2024", 4.40), ("2023", 3.40),
+                             ("2022", 2.40), ("2021", 1.60))]
+
+        with patch("tushare_collector.time.sleep"):
+            client._safe_call = MagicMock(return_value=pd.DataFrame(rows))
+            client._get_yf_annual_dividends = MagicMock(return_value={"2024": 9.9})
+            client.get_dividends("00700.HK")
+
+        assert not client._store.get("_dividend_warning")
+        assert client._get_yf_annual_dividends.call_count == 0
+
 
 class TestHKPlaceholderSections:
     """Test HK placeholder sections for unsupported data."""
@@ -1958,8 +2236,9 @@ class TestHKAssembly:
             result = client.assemble_data_pack("00700.HK")
 
         assert "# 数据包 — 00700.HK" in result
-        assert "报表币种: HKD" in result
-        assert "百万港元" in result
+        assert "交易币种: HKD" in result
+        assert "报表币种: **未确认**" in result
+        assert "百万·币种未确认" in result   # 报表币种未确认，不猜港元
         # Core sections should be present
         assert "1. 基本信息" in result
         assert "3. 合并利润表" in result
@@ -2439,7 +2718,7 @@ class TestHKHoldersYfinance:
         client._yf_available = False
         result = client.get_holders("00700.HK")
         assert "yfinance不可用" in result
-        assert "§7 待Agent WebSearch补充" in result
+        assert "§7 待Agent补充" in result
 
     def test_holders_yf_exception(self):
         """Should handle yfinance exception gracefully."""
@@ -2845,11 +3124,81 @@ class TestUnitLabelHelpers:
         assert client._unit_label() == "百万元"
         assert client._price_unit() == "元"
 
-    def test_hkd_labels(self):
+    def test_hkd_trading_but_unconfirmed_reporting(self):
+        """Trading currency is not the reporting currency (known_issues.md P0-2).
+
+        06862.HK trades in HKD but reports in CNY. Before the split, `_unit_label`
+        returned "百万港元" from the ticker suffix alone, mislabelling every figure
+        in the financial statements. Now an unconfirmed reporting currency says so.
+        """
         client = _make_client()
         client._currency = "HKD"
-        assert client._unit_label() == "百万港元"
+        assert client._unit_label() == "百万·币种未确认"
+        assert client._price_unit() == "港元"          # prices ARE in HKD
+
+    def test_hkd_with_confirmed_cny_reporting(self):
+        """Once fx.json confirms the reporting currency, the label follows it."""
+        client = _make_client()
+        client._currency = "HKD"
+        client._store["fx"] = {"factor_to_reporting": 0.86476, "reporting_currency": "CNY"}
+        assert client._unit_label() == "百万元"
         assert client._price_unit() == "港元"
+
+    def test_hkd_with_confirmed_hkd_reporting(self):
+        """A genuine HKD reporter (e.g. 00001.HK) keeps the HKD label."""
+        client = _make_client()
+        client._currency = "HKD"
+        client._store["fx"] = {"factor_to_reporting": 1.0, "reporting_currency": "HKD"}
+        assert client._unit_label() == "百万港元"
+
+    def test_per_share_unit_follows_the_reporting_currency(self):
+        """EPS/BPS come off the statements → reporting currency, not trading."""
+        client = _make_client()
+        client._currency = "HKD"
+        assert client._per_share_unit() == "元·币种未确认"
+        client._store["fx"] = {"reporting_currency": "CNY"}
+        assert client._per_share_unit() == "元"
+        client._store["fx"] = {"reporting_currency": "HKD"}
+        assert client._per_share_unit() == "港元"
+        # A-share / US defaults
+        other = _make_client()
+        assert other._per_share_unit() == "元"
+
+    def test_pack_header_separates_trading_and_reporting_currency(self):
+        """The header must not label the ticker-suffix currency as 报表币种."""
+        client = _make_client()
+        header = client._build_header("06862.HK")
+        assert "交易币种: HKD" in header
+        assert "报表币种: **未确认**" in header
+        client._store["fx"] = {"reporting_currency": "CNY"}
+        header = client._build_header("06862.HK")
+        assert "报表币种: CNY" in header
+
+    def test_trading_currency_detection(self):
+        """`_detect_trading_currency` is suffix-based; the alias still resolves."""
+        client = _make_client()
+        assert client._detect_trading_currency("06862.HK") == "HKD"
+        assert client._detect_trading_currency("AAPL.US") == "USD"
+        assert client._detect_trading_currency("600941.SH") == "CNY"
+        assert client._detect_currency("06862.HK") == "HKD"   # backwards-compatible alias
+
+    def test_reporting_currency_never_guesses_for_hk(self):
+        """HK reporting currency must be confirmed, never inferred from the suffix."""
+        client = _make_client()
+        assert client._reporting_currency("06862.HK") is None
+        client._store["fx"] = {"reporting_currency": "CNY"}
+        assert client._reporting_currency("06862.HK") == "CNY"
+
+    def test_reporting_currency_market_defaults_ignore_stale_fx(self):
+        """A-share/US reporting currency comes from the market, not from fx.json.
+
+        The confirmation is only meaningful where ambiguity is real (HK); a stale
+        fx.json in the store must not relabel an A-share or a US listing.
+        """
+        client = _make_client()
+        client._store["fx"] = {"reporting_currency": "CNY"}
+        assert client._reporting_currency("600941.SH") == "CNY"
+        assert client._reporting_currency("AAPL.US") == "USD"
 
     def test_usd_labels(self):
         client = _make_client()
@@ -2955,3 +3304,41 @@ class TestUSFYDetectionBeforeYFFill:
         assert yf_used
         # 20240928 should have been matched to 2024-09-30 via fallback
         assert filled.iloc[0]["operate_profit"] == 120000.0
+
+
+class TestYFinanceLazyLoader:
+    """`_yf()` must work both as a library and as a `python script.py` run.
+
+    Regression (found on a live run 2026-10-13): `_yf()` read
+    `sys.modules["tushare_collector"].yf`. When the collector is executed as a
+    script Python registers it as `__main__`, so the lookup raised
+    `KeyError: 'tushare_collector'` and the **entire yfinance fallback silently
+    failed**. Tests never caught it because they `import tushare_collector`
+    first, creating the very key that the CLI path lacks.
+    """
+
+    def test_prefers_collector_module(self, monkeypatch):
+        import types
+        from tushare_modules.yfinance_integration import _yf
+        fake = types.ModuleType("tushare_collector")
+        fake.yf = "FROM_COLLECTOR"
+        monkeypatch.setitem(sys.modules, "tushare_collector", fake)
+        assert _yf() == "FROM_COLLECTOR"
+
+    def test_falls_back_to_main_when_run_as_script(self, monkeypatch):
+        """The CLI path: no `tushare_collector` key, module is `__main__`."""
+        import types
+        from tushare_modules.yfinance_integration import _yf
+        monkeypatch.delitem(sys.modules, "tushare_collector", raising=False)
+        fake_main = types.ModuleType("__main__")
+        fake_main.yf = "FROM_MAIN"
+        monkeypatch.setitem(sys.modules, "__main__", fake_main)
+        assert _yf() == "FROM_MAIN"
+
+    def test_imports_yfinance_when_no_module_carries_it(self, monkeypatch):
+        """Library use with no collector module at all must still work."""
+        import types
+        from tushare_modules.yfinance_integration import _yf
+        monkeypatch.delitem(sys.modules, "tushare_collector", raising=False)
+        monkeypatch.setitem(sys.modules, "__main__", types.ModuleType("__main__"))
+        assert _yf() is not None          # falls through to `import yfinance`

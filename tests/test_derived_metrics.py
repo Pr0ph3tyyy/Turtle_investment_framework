@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from tushare_collector import TushareClient
+from section_contract import check_pack_consistency, headings_in_pack
 
 MOCK_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "mock_tushare_responses")
 
@@ -263,20 +264,26 @@ class TestFactor2Inputs:
         assert "N（支付率3年标准差）" in result
 
     def test_buyback_annual_avg(self):
-        """O should default to 0 (cannot determine cancellation-type programmatically)."""
+        """无 `o.json` ⇒ O 仍为 0，但说明文字必须**能区分"确认过"与"没确认"**。
+
+        旧文案无论上游有没有回购记录都印「默认0（无法区分注销型）」，读者无法分辨；
+        现由 `turtle_core.o_input.OInput.describe()` 单点给出（findings D-3）。
+        """
         client = _make_client_with_store()
         result = client._compute_factor2_inputs("600887.SH")
         assert "O（年均回购金额）" in result
         assert "0.00" in result
-        assert "默认0" in result
+        assert "待年报确认" in result          # 未确认状态必须显式
+        assert "注销型" in result              # 说明为什么默认 0
 
     def test_threshold_a_share(self):
-        """II for A-share: max(3.5%, Rf+2%)."""
+        """II is uniform across markets: max(5%, Rf+3%)."""
         client = _make_client_with_store()
         result = client._compute_factor2_inputs("600887.SH")
         assert "II（门槛值）" in result
-        # Rf ≈ 2.315%, so II = max(3.5%, 4.315%) = 4.315%
-        assert "4.3" in result
+        # Rf ≈ 2.315% → max(5%, 5.315%) = 5.315% → renders 5.31%
+        assert "5.31%" in result
+        assert "max(5.0%, 2.31%+3.0%)" in result
 
     def test_threshold_hk(self):
         """II for HK stock: max(5%, Rf+3%)."""
@@ -286,11 +293,11 @@ class TestFactor2Inputs:
         assert "5.3" in result
 
     def test_threshold_us(self):
-        """II for US stock: max(4%, Rf+2%)."""
+        """The same uniform rule applies to US listings (no separate tier)."""
         client = _make_client_with_store()
         result = client._compute_factor2_inputs("AAPL.US")
-        # Rf ≈ 2.315%, so II = max(4%, 4.315%) = 4.315%
-        assert "4.3" in result
+        # Rf ≈ 2.315% → max(5%, 5.315%) = 5.315%
+        assert "5.31%" in result
         assert "美股" in result
 
     def test_oe_base(self):
@@ -494,6 +501,32 @@ class TestFactor3Step4:
         result = client._compute_factor3_step4()
         assert "8,520.00" in result
 
+    # --- W2 three-level fallback chain (added 2026-10-13, known_issues.md A4) ---
+
+    def test_w2_prefers_income_staff_cost(self):
+        """W2 chain (1): 利润表「薪金福利支出」优先于现金流量表字段.
+
+        HK by-nature reports expose staff cost on the income statement only;
+        the cashflow field c_pay_to_staff is A-share specific. Real case:
+        06862 FY2025 staff cost = 14,073.0 (百万).
+        """
+        client = _make_client_with_store()
+        client._store["income"]["c_pay_to_staff"] = 99_000_000_000.0
+        result = client._compute_factor3_step4()
+        assert "99,000.00" in result
+        # hitting chain (1) must not emit the SGA-fallback dagger
+        assert "†" not in result
+
+    def test_w2_sga_fallback_is_daggered_and_documented(self):
+        """W2 chain (3): both real sources missing → SGA proxy, flagged with †."""
+        client = _make_client_with_store()
+        client._store["cashflow"]["c_pay_to_staff"] = None
+        result = client._compute_factor3_step4()
+        # SGA = sell 10,520 + admin 3,890 + rd 580 = 14,990 (百万)
+        assert "14,990.00" in result
+        assert "†" in result
+        assert "SGA 兜底" in result
+
     def test_w3_cash_tax(self):
         """W3 for 2024: income_tax - (DTA_chg - DTL_chg)
         = 2483M - (170M - 40M) = 2483M - 130M = 2353M."""
@@ -533,35 +566,74 @@ class TestSensitivityBase:
         client._compute_factor3_step4()
 
     def test_output_contains_headers(self):
-        """Output should have §17.5 header and surplus table."""
+        """Output should have §17.5 header and the OCF-anchored table."""
         client = _make_client_with_store()
         self._run_prerequisites(client)
         result = client._compute_factor3_sensitivity_base()
         assert result is not None
         assert "17.5 因子3·步骤7" in result
-        assert "基准结余" in result
+        assert "AA（OCF 锚定）" in result
+        assert "倒推结余（审计）" in result
         assert "AA" in result
 
     def test_base_surplus_2024(self):
-        """Base surplus 2024: 120010M - 96223M - 7850M = 15937M → 15,937.00."""
+        """Audit column keeps the legacy reconstructed base: 120010M - 96223M - 7850M = 15937M."""
         client = _make_client_with_store()
         self._run_prerequisites(client)
         result = client._compute_factor3_sensitivity_base()
         assert "15,937.00" in result
 
-    def test_aa_2y_default(self):
-        """AA_2y (default): mean of [15937, 15239] = 15588.00 → 15,588.00."""
+    def test_aa_is_ocf_minus_capex(self):
+        """AA = OCF − |Capex|, per the documented factor-3 definition.
+
+        2024: OCF 16,850M − Capex 7,850M = 9,000M.
+        """
         client = _make_client_with_store()
         self._run_prerequisites(client)
         result = client._compute_factor3_sensitivity_base()
-        assert "15,588.00" in result or "15,588" in result
+        assert "9,000.00" in result
+        assert client._store["factor3_sensitivity"]["aa_basis"] == "ocf_minus_capex"
+
+    def test_aa_2y_default(self):
+        """AA_2y (default): mean of [9000, 8420] = 8710.00."""
+        client = _make_client_with_store()
+        self._run_prerequisites(client)
+        result = client._compute_factor3_sensitivity_base()
+        assert "8,710.00" in result
 
     def test_aa_all_reference(self):
-        """AA_all (reference): mean of [15937, 15239, 18515, 16602] ≈ 16573.25 → 16,573.25."""
+        """AA_all: mean of [9000, 8420, 7880, 7300, 6460] = 7812.00."""
         client = _make_client_with_store()
         self._run_prerequisites(client)
         result = client._compute_factor3_sensitivity_base()
-        assert "16,573.25" in result or "16,573" in result
+        assert "7,812.00" in result
+
+    def test_aa_latest_exposed(self):
+        """AA_latest (short-sighted 口径) must be surfaced for later use.
+
+        Store values are RAW currency units (元); the rendered table divides by 1e6.
+        """
+        client = _make_client_with_store()
+        self._run_prerequisites(client)
+        result = client._compute_factor3_sensitivity_base()
+        assert "AA_latest" in result
+        assert client._store["factor3_sensitivity"]["aa_latest"] == 9_000_000_000.0
+        assert client._store["factor3_sensitivity"]["aa_2y"] == 8_710_000_000.0
+
+    def test_reconstructed_path_deviation_is_flagged(self):
+        """The old reconstruction diverges hugely → must be flagged, not silently kept."""
+        client = _make_client_with_store()
+        self._run_prerequisites(client)
+        result = client._compute_factor3_sensitivity_base()
+        assert "倒推口径与 OCF 锚定口径偏差过大" in result
+
+    def test_audit_column_documents_its_absence(self):
+        """AA is independent of §17.3/§17.4; only the audit column needs them."""
+        client = _make_client_with_store()
+        result = client._compute_factor3_sensitivity_base()
+        assert result is not None
+        assert "倒推口径不可用" in result
+        assert "AA（OCF 锚定）" in result
 
     def test_cv_present(self):
         """Revenue CV should be present."""
@@ -578,11 +650,99 @@ class TestSensitivityBase:
         assert "经营杠杆系数 λ" in result
         assert "λ可靠性" in result
 
-    def test_returns_none_without_prerequisites(self):
-        """Should return None if step1/step4 not run."""
+    def test_c3_gate_reports_when_ocf_or_capex_missing(self):
+        """C3 hard gate: without OCF+Capex for ≥2 years, say why instead of guessing."""
         client = _make_client_with_store()
+        cf = client._store["cashflow"].copy()
+        cf["n_cashflow_act"] = None
+        client._store["cashflow"] = cf
         result = client._compute_factor3_sensitivity_base()
+        # 硬门禁必须**登记为 missing 并返回 None**：返回一段"本节未生成"的正文会让
+        # assembly 按"有内容"记成 ok，与 §17 状态契约（heading ⟺ ok）冲突（独立审计 P1）。
         assert result is None
+        assert "factor3_sensitivity" not in client._store
+        reg = client._section_registry()
+        assert reg.status_of("17.5") == "missing", reg.status_of("17.5")
+        assert reg.finalize_entries()["17.5"]["reason"] == "no_cashflow" \
+            if hasattr(reg, "finalize_entries") else True
+
+    # --- 21e: documented extra deductions (known_issues.md §3.21) ---
+
+    @staticmethod
+    def _with_cashflow_fields(client, **fields):
+        cf = client._store["cashflow"].copy()
+        for name, value in fields.items():
+            cf[name] = value
+        client._store["cashflow"] = cf
+        return client
+
+    def test_documented_deductions_reduce_aa(self):
+        """收购/租赁/少数股权/已付利息(融资) must all reduce AA.
+
+        185 (百万) deducted from every year:
+          AA_2y = ((9000−185) + (8420−185)) / 2 = 8525
+        """
+        client = self._with_cashflow_fields(
+            _make_client_with_store(),
+            c_pay_acq_sub=100_000_000.0,
+            c_pay_fin_lease=50_000_000.0,
+            c_pay_minority=25_000_000.0,
+            c_pay_int_finance=10_000_000.0,
+        )
+        self._run_prerequisites(client)
+        result = client._compute_factor3_sensitivity_base()
+        assert "185.00" in result
+        assert "8,525.00" in result
+        assert client._store["factor3_sensitivity"]["aa_2y"] == 8_525_000_000.0
+
+    def test_net_inflow_is_not_treated_as_outflow(self):
+        """Negative value = net inflow — `abs()` would wrongly deduct it.
+
+        06049 FY2025 收购附属公司 = −5.94 (百万) is a real net inflow.
+        """
+        client = self._with_cashflow_fields(
+            _make_client_with_store(), c_pay_acq_sub=-5_940_000.0)
+        self._run_prerequisites(client)
+        client._compute_factor3_sensitivity_base()
+        assert client._store["factor3_sensitivity"]["aa_2y"] == 8_710_000_000.0
+
+    def test_operating_classified_interest_is_not_deducted(self):
+        """已付利息(经营) already sits inside OCF — deducting it would double count."""
+        client = self._with_cashflow_fields(
+            _make_client_with_store(),
+            c_pay_int_operating=999_000_000.0,   # must be ignored
+            c_pay_int_finance=None,
+        )
+        self._run_prerequisites(client)
+        client._compute_factor3_sensitivity_base()
+        assert client._store["factor3_sensitivity"]["aa_2y"] == 8_710_000_000.0
+
+    def test_financing_classified_interest_is_deducted(self):
+        """已付利息(融资) is outside OCF, so it must be deducted."""
+        client = self._with_cashflow_fields(
+            _make_client_with_store(),
+            c_pay_int_finance=10_000_000.0,
+            c_pay_int_operating=None,
+        )
+        self._run_prerequisites(client)
+        client._compute_factor3_sensitivity_base()
+        assert client._store["factor3_sensitivity"]["aa_2y"] == 8_700_000_000.0
+
+    def test_a_share_has_no_deduction_fields(self):
+        """A-share standard field set has none of these items → AA unchanged."""
+        client = _make_client_with_store()
+        for col in ("c_pay_acq_sub", "c_pay_fin_lease", "c_pay_minority",
+                    "c_pay_int_finance"):
+            assert col not in client._store["cashflow"].columns
+        self._run_prerequisites(client)
+        result = client._compute_factor3_sensitivity_base()
+        assert client._store["factor3_sensitivity"]["aa_2y"] == 8_710_000_000.0
+        assert "A 股不支持①" in result
+
+    def test_returns_none_without_cashflow_data(self):
+        """No store at all → None (assembly reports the block as not generated)."""
+        client = _make_client()
+        assert client._compute_factor3_sensitivity_base() is None
 
 
 # ===== Integration tests =====
@@ -629,12 +789,22 @@ class TestComputeDerivedMetrics:
         assert "17.5 因子3·步骤7" in result
 
     def test_graceful_with_empty_store(self):
-        """Should not crash with empty _store."""
+        """Must not crash; absent sections must be explicitly enumerated.
+
+        New contract (known_issues.md P2-20): a `### 17.N` heading exists **iff**
+        that section's status is `ok`. Absence used to be silent; now it is a
+        machine-readable `missing` entry, so "not computed" can never be read as
+        "computed as zero" (nor trigger an LLM hand-calculation).
+        """
         client = _make_client()
         result = client.compute_derived_metrics("600887.SH")
         assert "17. 衍生指标" in result
-        # Should not contain 17.1 since no data
-        assert "17.1" not in result
+        assert headings_in_pack(result) == set()          # no headings at all
+        payload = client._store["section17_status"]
+        assert payload["sections"], "status contract must enumerate every section"
+        assert all(e["status"] == "missing" for e in payload["sections"].values())
+        assert "❌ missing" in result
+        assert check_pack_consistency(result, payload) == []
 
     def test_contains_disclaimer(self):
         """Output should contain the disclaimer about deterministic computation."""
@@ -653,7 +823,6 @@ def _make_client_with_ev_store():
     # Add basic_info
     basic_df = _load_mock("daily_basic.json")
     client._store["basic_info"] = basic_df
-
     # Add weekly_prices with known min=15.50
     import numpy as np
     np.random.seed(42)
@@ -757,12 +926,18 @@ class TestFactor4EVBaseline:
         assert "15.50" in result
 
     def test_composite_baseline(self):
-        """Median of [1.46, 9.26, 15.50, 29.56, 43.85] = 15.50."""
+        """基准价按**语义分组**，不给跨语义的单一均值。
+
+        旧实现把五项等权平均（一个既不是底价也不是公允价的数），06862 上因此得到 9.44，
+        高于悲观档买点 8.67 ⇒ "低于基准线 — 买入就是胜利" 会在模型判定"不可买"的价位触发。
+        现在分列：**综合底价** = ①②③ 均值（1.46/9.26/15.50 → 8.74）；
+        **参考公允价** = ④⑤ 均值（29.56/43.85 → 36.70）。
+        """
         client = _make_client_with_ev_store()
         result = client._compute_factor4_ev_baseline("600887.SH")
-        assert "综合基准价" in result
-        # Median is 15.50
-        assert "15.50" in result
+        assert "综合底价（底价型锚点算术平均，3 项）= 8.74" in result
+        assert "参考公允价（收益率型锚点算术平均，2 项" in result
+        assert "36.70" in result
 
     def test_premium(self):
         """(27.50/15.50 - 1) × 100 = 77.4%."""
@@ -771,10 +946,17 @@ class TestFactor4EVBaseline:
         assert "77.4" in result or "溢价" in result
 
     def test_premium_verdict(self):
-        """77.4% is in 30-80% range → 合理溢价."""
+        """档位只挂在**收益率型公允价**读数上；底价读数只回答"是否低于底价"。
+
+        该夹具：27.50 / 36.70 − 1 = −25.1% ⇒ "安全边际充足"；
+        底价读数 27.50 / 8.74 − 1 = +214.6% ⇒ 明确**不构成**「低于底价 — 买入就是胜利」。
+        """
         client = _make_client_with_ev_store()
         result = client._compute_factor4_ev_baseline("600887.SH")
-        assert "合理溢价" in result
+        assert "安全边际充足" in result
+        # 小节标题本身含"买入就是胜利"，故断言**判定串**而非该短语
+        assert "低于底价 — 买入就是胜利" not in result, "高于底价时不得发出买点语义的读数"
+        assert "不构成" in result
 
     def test_returns_none_no_basic_info(self):
         """Should return None if basic_info missing."""
@@ -856,3 +1038,292 @@ class TestUnitLabelsInDerivedMetrics:
         assert result is not None
         assert "百万美元" in result
         assert "百万元" not in result.replace("百万美元", "")
+
+
+class TestFactor4EVBaselineCaliber:
+    """§17.8 must use ONE caliber, and Tushare's fina_indicator must not silently override it.
+
+    Live-run regression (002984, 2026-10-13). The old code overwrote ``ebitda``/``net_debt``/
+    ``fcf`` with Tushare ``fina_indicator`` fields whose definitions differ. Observed
+    consequences in the real data pack:
+
+    - the EV row implied a **third** cash caliber (2,101.73 vs 货币资金 2,242.01), so §17.8
+      disagreed with §17.7 (控股结构辅助) inside the same data pack;
+    - FCF yield was reported as **+2.88%** while the real FCF (经营现金流 − 资本开支) was
+      −231.85 百万元 = **−1.59%** — the sign flipped, because Tushare's ``fcff`` is free cash
+      flow to the *firm*, not FCF;
+    - EBITDA was reported as 1,926.79 although the stated formula
+      (营业利润 + 财务费用 + D&A) yields 1,879.95.
+
+    The pre-existing fixture never populated ``fina_indicators``, which is exactly why the
+    original tests could not catch this.
+    """
+
+    @staticmethod
+    def _client_with_conflicting_fina():
+        import pandas as pd
+
+        client = _make_client_with_ev_store()
+        client._store["fina_indicators"] = pd.DataFrame({
+            "end_date": ["20251231"],
+            "ebitda": [1.92679e9],   # ≠ 营业利润+财务费用+D&A (16,410)
+            "netdebt": [6.1753e8],   # ≠ 有息负债−货币资金 (which yields −7,760)
+            "fcff": [4.2e8],         # positive, unlike this stock's real FCF
+        })
+        return client
+
+    def test_primary_rows_keep_the_self_computed_caliber(self):
+        """Tushare's differently-defined fields must not move the primary ratios."""
+        result = self._client_with_conflicting_fina()._compute_factor4_ev_baseline("600887.SH")
+        assert "167,240.00" in result, "EV 必须仍为 市值+有息负债−货币资金"
+        assert "16,410.00" in result, "EBITDA 必须仍为 营业利润+财务费用+D&A"
+        assert "5.14" in result, "FCF收益率 必须仍为 (经营现金流−资本开支)/市值"
+        assert "-0.47" in result, "净负债/EBITDA 必须仍为 (有息负债−货币资金)/EBITDA"
+
+    def test_tushare_values_appear_only_as_labelled_reference_rows(self):
+        result = self._client_with_conflicting_fina()._compute_factor4_ev_baseline("600887.SH")
+        assert "· 对照" in result, "Tushare 值必须以对照行出现"
+        assert "1,926.79" in result, "Tushare EBITDA 应作为对照行出现"
+        assert "617.53" in result, "Tushare netdebt 应作为对照行出现"
+        assert "420.00" in result, "Tushare FCFF 应作为对照行出现"
+        assert "不是" in result and "FCFF" in result, "必须声明 FCFF ≠ FCF"
+
+    def test_caliber_note_is_present(self):
+        result = self._client_with_conflicting_fina()._compute_factor4_ev_baseline("600887.SH")
+        assert "口径说明" in result
+        assert "货币资金" in result
+
+    def test_ev_never_exceeds_market_cap_when_net_cash(self):
+        """With net cash the narrow caliber must produce EV < 市值 (not a third caliber)."""
+        result = self._client_with_conflicting_fina()._compute_factor4_ev_baseline("600887.SH")
+        # 市值 175,000 + 净负债 (21,200 − 28,960) = 167,240
+        assert "167,240.00" in result
+        assert "185,175.30" not in result, "不得出现 Tushare netdebt 造成的 EV"
+
+
+class TestSectionStatusContractOnMissing:
+    """§17 状态契约：`### 17.N` heading 存在 ⟺ 该节 status == ok。
+
+    重建时 §17.5 在硬门禁下把"本节未生成"渲染进正文**并返回非空字符串**，
+    于是 assembly 记成 ok —— heading 与 ok 同时成立、却什么都没算出来（独立审计 P1）。
+    """
+
+    def test_gate_failure_registers_missing_and_omits_the_heading(self):
+        client = _make_client_with_store()
+        cf = client._store["cashflow"].copy()
+        cf["n_cashflow_act"] = None
+        client._store["cashflow"] = cf
+        reg = client._section_registry()
+        before = reg.status_of("17.5")
+        assert client._compute_factor3_sensitivity_base() is None
+        # 未登记 ⇒ 契约按 missing 兜底；显式登记后仍是 missing，绝不是 ok
+        assert reg.status_of("17.5") == "missing"
+        assert reg.status_of("17.5") != before or before != "ok"
+
+class TestBuybackAnnualAvgFromSidecar:
+    """`o.json` 接线（findings D-3）：默认行为不变；**非零 O 必须有来源**。"""
+
+    def _client(self, tmp_path, payload, monkeypatch):
+        client = _make_client_with_store()
+        client._store["_output_path"] = str(tmp_path / "data_pack_market.md")
+        if payload is not None:
+            (tmp_path / "o.json").write_text(json.dumps(payload, ensure_ascii=False),
+                                             encoding="utf-8")
+        return client
+
+    def test_default_is_zero_and_unchanged(self, tmp_path):
+        client = self._client(tmp_path, None, None)
+        o = client._o_input()
+        assert o.o_annual_mm == 0.0 and o.is_default
+
+    def test_nonzero_with_source_flows_into_section(self, tmp_path):
+        client = self._client(tmp_path, {
+            "o_annual_mm": 123.4, "years": 5, "source": "2025年报 p.56",
+            "confirmed_by": "human"}, None)
+        result = client._compute_factor2_inputs("600887.SH")
+        assert "123.40" in result and "p.56" in result
+        assert client._o_input().o_annual_mm == 123.4
+
+    def test_nonzero_without_source_rejected_and_logged(self, tmp_path):
+        """**核心**：没有来源的非零 O 比 0 更糟 ⇒ 拒绝并按 0，且必须登记。"""
+        client = self._client(tmp_path, {"o_annual_mm": 999.0}, None)
+        o = client._o_input()
+        assert o.o_annual_mm == 0.0 and o.is_default
+        warns = client._store.get("_o_input_warnings") or []
+        assert any("o_unsourced" in w for w in warns), "被拒的 o.json 必须留下痕迹"
+
+    def test_all_sections_share_one_value(self, tmp_path):
+        """§15/§17.9/§17.11/§17.14 必须用**同一个** O —— 三次独立字面量曾是隐患。"""
+        client = self._client(tmp_path, {
+            "o_annual_mm": 50.0, "source": "年报 p.9", "confirmed_by": "llm"}, None)
+        assert client._o_input() is client._o_input()      # 缓存 ⇒ 同对象
+        assert client._o_input().o_annual_mm == 50.0
+
+    def test_rejection_does_not_raise(self, tmp_path):
+        """坏文件不得让整节炸掉（那样 46 个测试全红，正是我这次踩的坑）。"""
+        client = self._client(tmp_path, None, None)
+        (tmp_path / "o.json").write_text("{not json", encoding="utf-8")
+        client._store.pop("_o_input_cache", None)
+        result = client._compute_factor2_inputs("600887.SH")
+        assert "O（年均回购金额）" in result
+
+
+class TestPayoutCrosscheckSingleMethod:
+    """§17.10：**只有一路可用时偏差无从谈起 ≠ 偏差为 0**。
+
+    实测事故（06078 海吉亚医疗，2026-10-16）：港股法1 停用 + 法3 缺
+    `dividends_declared.json` ⇒ 只有法2 出数。旧实现 `max_dev` 初值 0.0、
+    `max_pair` 初值 None，于是"单值"与"零偏差"同时成立；渲染稳定性一行时
+    `max_pair[0]` 下标 None → `TypeError: 'NoneType' object is not subscriptable`
+    ⇒ §17.10 整节 missing ⇒ §17.9/§17.11/§17.14（穿透回报率网格、悲观基准网格）
+    连带消失 —— 交付物里最核心的决策数字全部缺失，而门禁只报 6 节 missing。
+
+    canonical 口径见 `turtle_core/decision.py::_max_pairwise_dev`：可用值 < 2 时
+    返回 None。本节必须与之同口径。
+    """
+
+    @staticmethod
+    def _client(monkeypatch, years=("2025", "2024", "2023")):
+        import pandas as pd
+        client = _make_client()
+        income = pd.DataFrame([
+            {"end_date": f"{y}1231", "n_income_attr_p": 100_000_000.0 * (i + 1),
+             "basic_eps": 0.5 * (i + 1)}
+            for i, y in enumerate(years)
+        ])
+        cashflow = pd.DataFrame([
+            {"end_date": f"{y}1231", "c_pay_dist_dpcp_int_exp": 10_000_000.0}
+            for y in years
+        ])
+        client._store["income"] = income
+        client._store["cashflow"] = cashflow
+        # 法1 停用（港股路径）/ 法3 无 declared 数据 ⇒ 只余法2
+        client._store.pop("dividends", None)
+        client._store.pop("dividends_hk", None)
+        monkeypatch.setattr(client, "_get_payout_by_year", lambda: {})
+        return client
+
+    def test_single_method_does_not_raise_and_falls_back_to_method2(self, monkeypatch):
+        client = self._client(monkeypatch)
+        md = client._compute_payout_crosscheck()          # 旧实现：TypeError
+        assert md is not None
+        pc = client._store["payout_crosscheck"]
+        assert pc["m1"] is None and pc["m3"] is None
+        assert pc["m2"] is not None
+        assert pc["m_rec"] == pc["m2"] and pc["m_rec_label"] == "法2"
+        assert pc["m_pess"] == pc["m2"]
+        # 必须**明说**未经交叉校验，而不是假装"偏差 0% 一致通过"
+        assert "未经交叉校验" in pc["m_rec_reason"]
+        assert "偏差" not in pc["m_rec_reason"]
+
+    def test_single_method_is_not_recorded_as_a_stability_reading(self, monkeypatch):
+        """单值不得登记成 stability 项 —— 那会读成"偏差 0%，稳定"。"""
+        client = self._client(monkeypatch)
+        client._compute_payout_crosscheck()
+        assert "M_method" not in (client._store.get("stability") or {})
+
+    def test_two_methods_still_compute_deviation(self, monkeypatch):
+        """回归护栏：≥2 路可用时偏差与 pair 标签必须照旧。"""
+        client = self._client(monkeypatch)
+        monkeypatch.setattr(client, "_get_payout_by_year",
+                            lambda: {"2025": 40.0, "2024": 40.0, "2023": 40.0})
+        client._compute_payout_crosscheck()
+        pc = client._store["payout_crosscheck"]
+        assert pc["m2"] is not None and pc["m3"] == 40.0
+        assert "法2" in pc["m_rec_reason"] and "法3" in pc["m_rec_reason"]
+        assert client._store["stability"]["M_method"]["value"] > 15.0
+
+
+class TestPayoutWindowZeroFill:
+    """§17.10 的三年均值：窗口 = **最近 3 个财年**，窗口内**有证据的零**必须按 0 计入。
+
+    实测事故（06078 海吉亚医疗，2026-10-16）：公司 FY2023–FY2025 **连续三个财年零派息**，
+    而 §5 现金流量表**没有对应的「已付股息」行**（真零 = 没有行）。旧实现用
+    「前 3 个非空值」取样 ⇒ 把两个真零当缺失剔除、**跨到更早的财年**：
+      法2 由 4.61% 被抬到 7.64%；法3 更因窗口内只剩一个点而**根本没做除法**，由 4.53% 抬到 13.58%。
+    同一个洞把 M_pess 抬高约 68%，直接放大 §17.14 的买点。
+    """
+
+    @staticmethod
+    def _client(monkeypatch, dist, ni, declared=None, extra_cf_years=None):
+        import pandas as pd
+        client = _make_client()
+        income = pd.DataFrame([
+            {"end_date": f"{y}1231", "n_income_attr_p": v, "basic_eps": v / 618.499e6}
+            for y, v in ni.items()])
+        rows = [{"end_date": f"{y}1231", "c_pay_dist_dpcp_int_exp": v}
+                for y, v in dist.items()]
+        # ⚠️ 真实链路上，某财年**有现金流量表行但没有「已付股息」科目**（pivot 出 NaN），
+        # 与"整个财年没有行"是两回事。用 `dist` 里值为 None 的年份模拟前者。
+        for y, v in (extra_cf_years or {}).items():
+            rows.append({"end_date": f"{y}1231", "c_pay_dist_dpcp_int_exp": v})
+        cf = pd.DataFrame(rows) if rows else pd.DataFrame(
+            columns=["end_date", "c_pay_dist_dpcp_int_exp"])
+        # 直接把年报表交给 `_get_annual_df`：真实链路里 `end_date` 经长表→宽表 pivot 后
+        # 可能是数值型，用 store 注入会让 `str[4:6]` 匹配不上而静默取到空表
+        # （我第一版测试就栽在这里 —— 测试装置必须钉住输入形状，否则测的是装置）。
+        client._store["income"] = income
+        client._store["cashflow"] = cf
+        monkeypatch.setattr(client, "_get_annual_df",
+                            lambda key: income if key == "income" else cf)
+        client._store.pop("dividends", None)
+        client._store.pop("dividends_hk", None)
+        monkeypatch.setattr(client, "_get_payout_by_year",
+                            lambda: dict(declared or {}))
+        monkeypatch.setattr(client, "_declared_dividends",
+                            lambda: dict(declared or {}))
+        return client
+
+    def test_missing_flat_year_inside_window_counts_as_zero(self, monkeypatch):
+        # FY2024 在 §3 里存在、但 §5 无分配行 ⇒ 有证据的零，而不是"缺失"
+        client = self._client(
+            monkeypatch,
+            dist={"2025": 2_393_000.0, "2023": 94_479_000.0, "2021": 74_081_000.0},
+            ni={"2025": 164_526_000.0, "2024": 598_261_000.0, "2023": 682_928_000.0,
+                "2022": 476_784_000.0, "2021": 441_457_000.0},
+            extra_cf_years={"2024": None, "2022": None})
+        client._compute_payout_crosscheck()
+        m2 = client._store["payout_crosscheck"]["m2"]
+        # 窗口 {2025,2024,2023}；2024 补 0 ⇒ (1.454 + 0 + 13.834)/3 = 5.10（**不是** 7.64）
+        assert abs(m2 - 5.10) < 0.05, f"法2 应为 5.10%，实为 {m2:.2f}%（旧实现给 7.64%）"
+
+    def test_flat_year_outside_income_window_is_not_filled(self, monkeypatch):
+        """§3 没有那一年 ⇒ 无从判定，**不得**补零（避免凭空虚造一个零派息事实）。"""
+        client = self._client(
+            monkeypatch,
+            dist={"2025": 2_393_000.0, "2023": 94_479_000.0},
+            ni={"2025": 164_526_000.0, "2024": 598_261_000.0, "2023": 682_928_000.0})
+        client._compute_payout_crosscheck()
+        # 只有 2025/2023 有值且都在窗口内 ⇒ (1.45+13.83)/2，未凭空补 0
+        assert abs(client._store["payout_crosscheck"]["m2"] - 7.64) < 0.05
+
+    def test_declared_sidecar_absent_means_method_unavailable_not_zero(self, monkeypatch):
+        """sidecar 缺失 ⇒ 法3「不可用」，**不是** 0%（0 会假装公司已宣告零派息）。"""
+        client = self._client(
+            monkeypatch,
+            dist={"2025": 2_393_000.0, "2023": 94_479_000.0},
+            ni={"2025": 164_526_000.0, "2024": 598_261_000.0, "2023": 682_928_000.0})
+        client._compute_payout_crosscheck()
+        assert client._store["payout_crosscheck"]["m3"] is None
+
+
+class TestDividendsDeclaredZeroIsASupportedFact:
+    """`value = 0` + `kind = "none"` = **已宣告不派付**，与"缺这条记录"语义不同。"""
+
+    def test_zero_with_kind_none_passes_schema(self, tmp_path):
+        import json
+        import sidecar_contract as sc
+        (tmp_path / "dividends_declared.json").write_text(json.dumps({
+            "declared_dps": {"2025": {"value": 0, "currency": "CNY", "kind": "none",
+                                      "source": "年报附注13：概无派付或建议派付任何股息",
+                                      "date": "2026-03-30"}}}), encoding="utf-8")
+        rep = sc.validate_dir(str(tmp_path))
+        assert rep.ok, f"显式零派息必须被接受，实得 {[f.detail for f in rep.findings]}"
+
+    def test_negative_still_rejected(self, tmp_path):
+        import json
+        import sidecar_contract as sc
+        (tmp_path / "dividends_declared.json").write_text(json.dumps({
+            "declared_dps": {"2025": {"value": -1, "currency": "CNY", "kind": "none",
+                                      "source": "s", "date": "d"}}}), encoding="utf-8")
+        assert not sc.validate_dir(str(tmp_path)).ok

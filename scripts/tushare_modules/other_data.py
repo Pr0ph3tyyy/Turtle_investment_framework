@@ -123,7 +123,7 @@ class OtherDataMixin:
         if not self._yf_available:
             lines.append("数据缺失 (yfinance不可用)")
             lines.append("")
-            lines.append("*[§7 待Agent WebSearch补充]*")
+            lines.append("*[§7 待Agent补充]*")
             return "\n".join(lines)
 
         try:
@@ -133,7 +133,7 @@ class OtherDataMixin:
         except Exception:
             lines.append("数据缺失 (yfinance不可用)")
             lines.append("")
-            lines.append("*[§7 待Agent WebSearch补充]*")
+            lines.append("*[§7 待Agent补充]*")
             return "\n".join(lines)
 
         # Major holders summary
@@ -169,12 +169,12 @@ class OtherDataMixin:
         if (major is None or major.empty) and (inst is None or inst.empty):
             lines.append("数据缺失 (yfinance无持股数据)")
             lines.append("")
-            lines.append("*[§7 待Agent WebSearch补充]*")
+            lines.append("*[§7 待Agent补充]*")
             return "\n".join(lines)
 
         lines.append("*数据来源: yfinance*")
         lines.append("")
-        lines.append("*[§7 待Agent WebSearch补充: 控股股东、管理层变更、违规记录等定性信息]*")
+        lines.append("*[§7 待Agent补充: 控股股东、管理层变更、违规记录等定性信息]*")
         return "\n".join(lines)
 
     def get_audit(self, ts_code: str) -> str:
@@ -231,6 +231,29 @@ class OtherDataMixin:
             return self._get_risk_free_rate_us()
         return self._get_risk_free_rate_cn()
 
+    def _render_seeded_rf(self, lines: list) -> bool:
+        """§14 回落到 CLI/协调器提供的 Rf 种子值（``--rf`` / ``TUSHARE_RF`` / 旧包 §14）。
+
+        缺了这条回落，包内会自相矛盾：§14 写「数据缺失」而 §17.2 写
+        「Rf = 1.67%（来自 §14）」，下游读 §14 会误判业绩下滑敏感性/穿透回报率网格/
+        收入敏感性不可用。种子值本就在 ``_store`` 里（``_seed_risk_free_rate``），
+        失败分支必须把它渲染出来。
+        """
+        rf_df = self._store.get("risk_free_rate")
+        if rf_df is None or getattr(rf_df, "empty", True):
+            return False
+        latest = rf_df.iloc[0]
+        lines.append(format_table(
+            ["日期", "10年期国债收益率 (%)"],
+            [[str(latest.get("trade_date", "—")),
+              f"{float(latest.get('yield', 0)):.4f}"]],
+            alignments=["l", "r"],
+        ))
+        lines.append("")
+        source = self._store.get("risk_free_rate_source", "外部替代值")
+        lines.append(f"*数据来源: {source}（`yc_cb` 无权限，使用外部提供的无风险利率）*")
+        return True
+
     def _get_risk_free_rate_cn(self) -> str:
         """Risk-free rate from 中债国债收益率曲线 (yc_cb)."""
         lines = [format_header(2, "14. 无风险利率"), ""]
@@ -244,11 +267,24 @@ class OtherDataMixin:
                                  end_date=today,
                                  fields="trade_date,yield")
         except RuntimeError:
+            if self._render_seeded_rf(lines):
+                return "\n".join(lines)
             lines.append("数据缺失 (接口可能无权限)\n")
+            lines.append(
+                "> ⚠️ 无风险利率不可用时，依赖它的预计算小节（业绩下滑敏感性、穿透回报率网格、"
+                "收入敏感性）无法生成。补救：在 §14 补写无风险利率或使用 `--rf <百分数>`，"
+                "然后**重跑全量采集**。\n"
+            )
             return "\n".join(lines)
 
         if df.empty:
+            if self._render_seeded_rf(lines):
+                return "\n".join(lines)
             lines.append("数据缺失\n")
+            lines.append(
+                "> ⚠️ 无风险利率不可用时，依赖它的预计算小节（业绩下滑敏感性、穿透回报率网格、"
+                "收入敏感性）无法生成。补救：使用 `--rf <百分数>` 后**重跑全量采集**。\n"
+            )
             return "\n".join(lines)
 
         df = df.sort_values("trade_date", ascending=False)
@@ -442,9 +478,15 @@ class OtherDataMixin:
             [
                 ["统计日期", str(latest.get("end_date", "—"))],
                 ["质押笔数", f"{int(latest.get('pledge_count', 0))}"],
-                ["无限售质押 (万股)", format_number(latest.get("unrest_pledge"), divider=1e4, decimals=2)],
-                ["有限售质押 (万股)", format_number(latest.get("rest_pledge"), divider=1e4, decimals=2)],
-                ["总股本 (万股)", format_number(latest.get("total_share"), divider=1e4, decimals=2)],
+                # ⚠️ 单位必须与 `divider` 一致（known_issues §四十一）：
+                # Tushare `pledge_stat` 返回的是**万股**，`divider=1e4` 把它化成**亿股**，
+                # 但标签原先写「万股」⇒ **10,000 倍**误标。实测工商银行写成
+                # 「总股本 (万股) = 2696.12」，而它实为 2,696.12 **亿股**（=2,696,122 万股），
+                # 与 §17.8 的「总股本（百万股）= 269,612.21」形成 10,000 倍的自相矛盾。
+                # 内部「质押比例」不受影响（两个同单位值相除），所以这个错误能长期潜伏。
+                ["无限售质押 (亿股)", format_number(latest.get("unrest_pledge"), divider=1e4, decimals=2)],
+                ["有限售质押 (亿股)", format_number(latest.get("rest_pledge"), divider=1e4, decimals=2)],
+                ["总股本 (亿股)", format_number(latest.get("total_share"), divider=1e4, decimals=2)],
                 ["质押比例 (%)", f"{latest.get('pledge_ratio', 0):.2f}"],
             ],
             alignments=["l", "r"],

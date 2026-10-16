@@ -10,6 +10,7 @@ Target sections:
     P4: Related party transactions (关联方交易)
     P6: Contingent liabilities (或有负债)
     P13: Non-recurring items (非经常性损益)
+    P14: Dividend policy / shareholder-return plan (利润分配与股东回报规划)
     MDA: Management Discussion & Analysis (管理层讨论与分析)
     SUB: Subsidiary holdings (主要控股参股公司)
 
@@ -107,6 +108,18 @@ SECTION_KEYWORDS: Dict[str, List[str]] = {
         "非經常性損益明細",
         "非經常性損益項目及金額",
     ],
+    "P14": [
+        # 因子2 的第一优先级数据：公告里的最低股息支付率 / 承诺金额
+        # （文档 [1:32:56]「首先要搜查有没有公开的文件规定了最低的股息支付率」；
+        #   [1:09:42]「写在了公开的公告里面，那就一票就直接成立」）
+        # Simplified Chinese
+        "利润分配政策", "股利分配政策", "现金分红政策", "分红政策",
+        "股东回报规划", "投资者回报规划", "未来三年股东回报",
+        "股东分红回报规划", "分红回报规划", "利润分配及现金分红",
+        # Traditional Chinese (HK / red-chip)
+        "利潤分配政策", "股利分配政策", "現金分紅政策", "派息政策",
+        "股東回報規劃", "投資者回報規劃",
+    ],
     "MDA": [
         # Simplified Chinese
         "管理层讨论与分析",
@@ -144,6 +157,7 @@ SECTION_KEYWORDS: Dict[str, List[str]] = {
 
 # Per-section extraction parameters (overrides defaults)
 SECTION_EXTRACT_CONFIG: Dict[str, Dict[str, int]] = {
+    "P14": {"buffer_pages": 2, "max_chars": 3000},
     "MDA": {"buffer_pages": 3, "max_chars": 8000},
     "SUB": {"buffer_pages": 2, "max_chars": 6000},
 }
@@ -174,6 +188,8 @@ SECTION_ZONE_PREFERENCES: Dict[str, Dict[str, List[str]]] = {
     "P4":  {"prefer": ["NOTES_ZONE"], "avoid": ["POLICY_ZONE"]},
     "P6":  {"prefer": ["NOTES_ZONE"], "avoid": ["POLICY_ZONE"]},
     "P13": {"prefer": ["SUPPLEMENT_ZONE", "NOTES_ZONE"], "avoid": ["POLICY_ZONE"]},
+    "P14": {"prefer": ["MDA_ZONE", "GOVERNANCE_ZONE", "INTRO_ZONE"],
+            "avoid": ["NOTES_ZONE", "POLICY_ZONE", "FIN_ZONE"]},
     "MDA": {"prefer": ["MDA_ZONE"], "avoid": ["NOTES_ZONE", "FIN_ZONE", "POLICY_ZONE", "SUPPLEMENT_ZONE"]},
     "SUB": {"prefer": ["NOTES_ZONE"], "avoid": ["POLICY_ZONE"]},
 }

@@ -28,7 +28,7 @@ Determine the market and format the code:
 
 ## Step 1: Search for the Report
 
-Use the **WebSearch** tool to find the PDF. Search sources are tried in priority order.
+Use the `web_search` tool to find the PDF. Search sources are tried in priority order.
 
 ### If no year was specified — determine the latest fiscal year:
 

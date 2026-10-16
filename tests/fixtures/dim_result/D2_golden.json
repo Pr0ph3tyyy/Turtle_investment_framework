@@ -1,0 +1,133 @@
+{
+  "schema_version": "1.0",
+  "dimension": "D2",
+  "stock_code": "002984.SZ",
+  "company_name": "青岛森麒麟轮胎股份有限公司",
+  "generated_at": "2026-10-13T02:30:00+08:00",
+  "slice": {
+    "provided_pages": [
+      10,
+      15,
+      16,
+      17,
+      19,
+      20,
+      22,
+      23,
+      24
+    ],
+    "total_pages": 175,
+    "dropped_pages": 60,
+    "budget_chars": 12000,
+    "used_chars": 11849,
+    "source": "annual_report_2025.txt",
+    "declared_incomplete": true
+  },
+  "verdict": {
+    "headline": "规模制造带来成本优势，但需求侧无壁垒，护城河评级中",
+    "confidence": "中",
+    "material_status": "充分"
+  },
+  "narrative": "本集团以轮胎制造为核心，产能与成本结构决定了资本密集度高，维持性资本开支长期高于折旧摊销，说明维持现有盈利规模需要持续投入。公司在半钢子午胎细分市场具备规模优势，单位制造成本低于国内同业，海外基地布局进一步摊薄了人工与能源成本；但需求侧缺乏品牌溢价与转换成本，客户以整车厂配套与替换市场为主，价格接受度高而议价能力偏弱，因此护城河主要来自供给侧而非需求侧。竞争对手在产能扩张与海外建厂上同步跟进，成本差距存在收敛风险，需持续跟踪单胎制造成本与产能利用率两个锚点。本集团以轮胎制造为核心，产能与成本结构决定了资本密集度高，维持性资本开支长期高于折旧摊销，说明维持现有盈利规模需要持续投入。公司在半钢子午胎细分市场具备规模优势，单位制造成本低于国内同业，海外基地布局进一步摊薄了人工与能源成本；但需求侧缺乏品牌溢价与转换成本，客户以整车厂配套与替换市场为主，价格接受度高而议价能力偏弱，因此护城河主要来自供给侧而非需求侧。竞争对手在产能扩张与海外建厂上同步跟进，成本差距存在收敛风险，需持续跟踪单胎制造成本与产能利用率两个锚点。本集团以轮胎制造为核心，产能与成本结构决定了资本密集度高，维持性资本开支长期高于折旧摊销，说明维持现有盈利规模需要持续投入。公司在半钢子午胎细分市场具备规模优势，单位制造成本低于国内同业，海外基地布局进一步摊薄了人工与能源成本；但需求侧缺乏品牌溢价与转换成本，客户以整车厂配套与替换市场为主，价格接受度高而议价能力偏弱，因此护城河主要来自供给侧而非需求侧。竞争对手在产能扩张与海外建厂上同步跟进，成本差距存在收敛风险，需持续跟踪单胎制造成本与产能利用率两个锚点。本集团以轮胎制造为核心，产能与成本结构决定了资本密集度高，维持性资本开支长期高于折旧摊销，说明维持现有盈利规模需要持续投入。公司在半钢子午胎细分市场具备规模优势，单位制造成本低于国内同业，海外基地布局进一步摊薄了人工与能源成本；但需求侧缺乏品牌溢价与转换成本，客户以整车厂配套与替换市场为主，价格接受度高而议价能力偏弱，因此护城河主要来自供给侧而非需求侧。竞争对手在产能扩张与海外建厂上同步跟进，成本差距存在收敛风险，需持续跟踪单胎制造成本与产能利用率两个锚点。",
+  "params": {
+    "market_structure": "垄断竞争",
+    "market_cr4": null,
+    "entry_barrier": "中",
+    "roe_5y_avg": 12.64,
+    "moat_existence": "可能存在",
+    "moat_evidence_strength": "中等证据",
+    "moat_type": "[非技术] 规模制造成本优势 + [技术] 不适用",
+    "moat_framework_primary": "B",
+    "supply_side_rating": "较强",
+    "demand_side_rating": "弱",
+    "scale_economy_rating": "较强",
+    "moat_flywheel": false,
+    "false_advantages": [
+      "海外基地布局带来的短期成本优势不构成结构性壁垒"
+    ],
+    "competitors": [
+      {
+        "name": "赛轮轮胎",
+        "ticker": "601058.SH"
+      }
+    ],
+    "competitor_ranking": "国内半钢胎前三，成本端领先，品牌端落后",
+    "advantage_gap_sustainability": "中",
+    "pricing_power": "中",
+    "human_capital_dep": "系统型",
+    "moat_sustainability": "中等可持续",
+    "moat_rating": "中",
+    "moat_monitor_kpis": [
+      {
+        "kpi": "单胎制造成本",
+        "current": "低于同业约5%",
+        "threshold": "低于同业3%"
+      }
+    ]
+  },
+  "key_metrics": [
+    {
+      "name": "5年平均ROE",
+      "value": 12.64,
+      "unit": "%",
+      "year": "2021-2025",
+      "source": {
+        "kind": "computed_metrics",
+        "ref": "CM§3"
+      }
+    },
+    {
+      "name": "研发费用",
+      "value": 462.7,
+      "unit": "百万元",
+      "year": 2025,
+      "source": {
+        "kind": "data_pack",
+        "ref": "DP§3"
+      }
+    },
+    {
+      "name": "前五大客户集中度",
+      "value": null,
+      "unit": "—",
+      "year": 2025,
+      "note": "年报未按客户名称披露集中度，合计口径不一致",
+      "source": {
+        "kind": "inference",
+        "ref": "推断",
+        "basis": "翻阅年报客户附注未发现分客户披露"
+      }
+    }
+  ],
+  "evidence": [
+    {
+      "claim": "公司自述在半钢子午胎细分市场具备规模成本优势",
+      "quote": "公司持续推进智能制造，单位制造成本处于行业领先水平",
+      "source": {
+        "kind": "annual_report",
+        "page": 15
+      }
+    }
+  ],
+  "cross_dimension_hooks": [
+    {
+      "target": "D1",
+      "fact": "维持性资本开支高于折旧摊销",
+      "why": "影响 D1 的 capital_intensity 判定",
+      "source": {
+        "kind": "computed_metrics",
+        "ref": "CM§1"
+      }
+    }
+  ],
+  "uncertainty": [
+    "海外基地产能爬坡进度未在 MD&A 中量化"
+  ],
+  "flags": [
+    {
+      "code": "slice_truncated",
+      "severity": "warn",
+      "detail": "仅提供 9/175 页"
+    }
+  ]
+}

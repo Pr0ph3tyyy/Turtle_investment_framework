@@ -6,7 +6,7 @@
 
 ## 数据采集补充（Phase 1B）
 
-港股 Tushare 数据覆盖有限，以下数据需 Agent 通过 WebSearch **完整采集**：
+港股 Tushare 数据覆盖有限，以下数据需 Agent 通过 `web_search` **完整采集**：
 
 | 数据项 | 搜索关键词 | 说明 |
 |-------|-----------|------|
@@ -17,7 +17,7 @@
 
 ### 财务数据验证
 
-当 data_pack_market.md §3-§5 仍有 "—" 标记时，通过 WebSearch 补充：
+当 data_pack_market.md §3-§5 仍有 "—" 标记时，通过 `web_search` 补充：
 - 折旧及摊销："{公司名} annual report depreciation amortization"
 - 资本开支："{公司名} capital expenditure capex"
 - 经营溢利："{公司名} operating profit"
